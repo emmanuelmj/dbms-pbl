@@ -1,0 +1,6 @@
+{
+  "name": "GCET PLACEMENT HUB",
+  "description": "Smart Placement Cell & Skill Matrix Portal for Geethanjali College of Engineering and Technology (Cheeryal, Keesara, Telangana).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
