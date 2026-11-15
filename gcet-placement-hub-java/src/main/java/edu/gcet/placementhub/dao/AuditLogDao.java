@@ -1,36 +1,59 @@
 package edu.gcet.placementhub.dao;
 
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.SQLException;
-import java.util.UUID;
+import com.mongodb.MongoException;
+import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoDatabase;
+import com.mongodb.client.model.Filters;
+import com.mongodb.client.model.Sorts;
+import edu.gcet.placementhub.models.AuditLog;
+import org.bson.Document;
+import org.bson.conversions.Bson;
+
+import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+import java.util.regex.Pattern;
+
+import static edu.gcet.placementhub.database.BsonUtil.*;
 
 /**
- * Non-blocking JDBC audit trail DAO writing to `audit_logs`.
+ * Append-only audit trail stored in the {@code audit_logs} collection
+ * ({@code actorId} references {@code users._id}). Writes never throw so a logging hiccup
+ * can never break a business operation.
  */
 public class AuditLogDao {
 
-    public void insertLog(Connection conn, String action, String actorId, String actorUsername, String actorRole, String details) {
-        String sql = "INSERT INTO audit_logs (id, action, actor_id, actor_username, actor_role, details, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())";
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, UUID.randomUUID().toString());
-            ps.setString(2, action);
-            ps.setString(3, actorId);
-            ps.setString(4, actorUsername != null ? actorUsername : "system");
-            ps.setString(5, actorRole != null ? actorRole : "SYSTEM");
-            ps.setString(6, details);
-            ps.executeUpdate();
-        } catch (SQLException ignored) {
+    public static final String COLLECTION = "audit_logs";
+
+    public static MongoCollection<Document> col(MongoDatabase db) {
+        return db.getCollection(COLLECTION);
+    }
+
+    public void insertLog(MongoDatabase db, String action, String actorId, String actorUsername, String actorRole, String details) {
+        try {
+            col(db).insertOne(buildLog(action, actorId, actorUsername, actorRole, details, new Date()));
+        } catch (MongoException ignored) {
             // Non-blocking audit log write
         }
     }
 
-    public java.util.List<edu.gcet.placementhub.models.AuditLog> findRecent(Connection conn, int limit) {
-        return findFiltered(conn, "", "ALL", "ALL", "", "", null, limit);
+    public static Document buildLog(String action, String actorId, String actorUsername, String actorRole, String details, Date at) {
+        return new Document("action", action)
+                .append("actorId", toKey(actorId))
+                .append("actorUsername", actorUsername != null ? actorUsername : "system")
+                .append("actorRole", actorRole != null ? actorRole : "SYSTEM")
+                .append("details", details)
+                .append("createdAt", at != null ? at : new Date());
     }
 
-    public java.util.List<edu.gcet.placementhub.models.AuditLog> findFiltered(
-            Connection conn,
+    public List<AuditLog> findRecent(MongoDatabase db, int limit) {
+        return findFiltered(db, "", "ALL", "ALL", "", "", null, limit);
+    }
+
+    public List<AuditLog> findFiltered(
+            MongoDatabase db,
             String search,
             String actionFilter,
             String roleFilter,
@@ -39,85 +62,81 @@ public class AuditLogDao {
             String restrictedActorId,
             int limit
     ) {
-        java.util.List<edu.gcet.placementhub.models.AuditLog> logs = new java.util.ArrayList<>();
-        StringBuilder sql = new StringBuilder(
-                "SELECT id, action, actor_id, actor_username, actor_role, details, created_at FROM audit_logs WHERE 1=1 "
-        );
-        java.util.List<Object> params = new java.util.ArrayList<>();
+        List<AuditLog> logs = new ArrayList<>();
+        List<Bson> clauses = new ArrayList<>();
 
         if (restrictedActorId != null && !restrictedActorId.isBlank()) {
-            sql.append(" AND actor_id = ? ");
-            params.add(restrictedActorId.trim());
+            clauses.add(refFilter("actorId", restrictedActorId.trim()));
         }
         if (actionFilter != null && !actionFilter.isBlank() && !"ALL".equalsIgnoreCase(actionFilter)) {
-            sql.append(" AND UPPER(action) = UPPER(?) ");
-            params.add(actionFilter.trim());
+            clauses.add(Filters.regex("action", "^" + Pattern.quote(actionFilter.trim()) + "$", "i"));
         }
         if (roleFilter != null && !roleFilter.isBlank() && !"ALL".equalsIgnoreCase(roleFilter)) {
-            sql.append(" AND UPPER(actor_role) = UPPER(?) ");
-            params.add(roleFilter.trim());
+            clauses.add(Filters.regex("actorRole", "^" + Pattern.quote(roleFilter.trim()) + "$", "i"));
         }
         if (fromDate != null && !fromDate.isBlank()) {
-            sql.append(" AND DATE(created_at) >= ? ");
-            params.add(fromDate.trim());
+            Date from = parseDay(fromDate);
+            if (from != null) clauses.add(Filters.gte("createdAt", from));
         }
         if (toDate != null && !toDate.isBlank()) {
-            sql.append(" AND DATE(created_at) <= ? ");
-            params.add(toDate.trim());
+            Date to = parseDay(toDate);
+            if (to != null) clauses.add(Filters.lt("createdAt", new Date(to.getTime() + 24L * 60 * 60 * 1000)));
         }
         if (search != null && !search.isBlank()) {
-            sql.append(" AND (LOWER(action) LIKE ? OR LOWER(actor_username) LIKE ? OR LOWER(actor_role) LIKE ? OR LOWER(details) LIKE ?) ");
-            String q = "%" + search.trim().toLowerCase(java.util.Locale.ROOT) + "%";
-            params.add(q);
-            params.add(q);
-            params.add(q);
-            params.add(q);
+            String q = Pattern.quote(search.trim());
+            clauses.add(Filters.or(
+                    Filters.regex("action", q, "i"),
+                    Filters.regex("actorUsername", q, "i"),
+                    Filters.regex("actorRole", q, "i"),
+                    Filters.regex("details", q, "i")));
         }
 
-        sql.append(" ORDER BY created_at DESC LIMIT ?");
-        params.add(Math.max(1, Math.min(limit, 1000)));
-
-        try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
-            for (int i = 0; i < params.size(); i++) {
-                Object val = params.get(i);
-                if (val instanceof Integer n) {
-                    ps.setInt(i + 1, n);
-                } else {
-                    ps.setString(i + 1, String.valueOf(val));
-                }
+        Bson filter = clauses.isEmpty() ? new Document() : Filters.and(clauses);
+        try {
+            for (Document d : col(db).find(filter).sort(Sorts.descending("createdAt")).limit(Math.max(1, Math.min(limit, 1000)))) {
+                logs.add(mapLog(d));
             }
-            try (java.sql.ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    edu.gcet.placementhub.models.AuditLog log = new edu.gcet.placementhub.models.AuditLog();
-                    log.setId(rs.getString("id"));
-                    log.setAction(rs.getString("action"));
-                    log.setActorId(rs.getString("actor_id"));
-                    log.setActorUsername(rs.getString("actor_username"));
-                    log.setActorRole(rs.getString("actor_role"));
-                    log.setDetails(rs.getString("details"));
-                    java.sql.Timestamp ts = rs.getTimestamp("created_at");
-                    if (ts != null) {
-                        log.setCreatedAt(ts.toInstant().toString());
-                    }
-                    logs.add(log);
-                }
-            }
-        } catch (SQLException ignored) {
+        } catch (MongoException ignored) {
             // Return empty list if audit_logs unavailable
         }
         return logs;
     }
 
-    public java.util.List<String> findDistinctActions(Connection conn) {
-        java.util.List<String> actions = new java.util.ArrayList<>();
-        try (PreparedStatement ps = conn.prepareStatement("SELECT DISTINCT action FROM audit_logs ORDER BY action ASC");
-             java.sql.ResultSet rs = ps.executeQuery()) {
-            while (rs.next()) {
-                String a = rs.getString(1);
+    public List<String> findDistinctActions(MongoDatabase db) {
+        List<String> actions = new ArrayList<>();
+        try {
+            for (String a : col(db).distinct("action", String.class)) {
                 if (a != null && !a.isBlank()) actions.add(a);
             }
-        } catch (SQLException ignored) {
+            actions.sort(String::compareTo);
+        } catch (MongoException ignored) {
         }
         return actions;
+    }
+
+    public long count(MongoDatabase db) {
+        return col(db).countDocuments();
+    }
+
+    private static Date parseDay(String raw) {
+        try {
+            String clean = raw.trim();
+            if (clean.length() > 10) clean = clean.substring(0, 10);
+            return Date.from(LocalDate.parse(clean).atStartOfDay(ZoneOffset.UTC).toInstant());
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
+    public static AuditLog mapLog(Document d) {
+        AuditLog log = new AuditLog();
+        log.setId(id(d));
+        log.setAction(str(d, "action"));
+        log.setActorId(ref(d, "actorId"));
+        log.setActorUsername(str(d, "actorUsername"));
+        log.setActorRole(str(d, "actorRole"));
+        log.setDetails(str(d, "details"));
+        log.setCreatedAt(iso(d, "createdAt"));
+        return log;
     }
 }

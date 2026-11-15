@@ -130,21 +130,42 @@ public final class GovernanceModels {
             String error
     ) {}
 
-    public record TableDiagnostic(
-            String tableName,
+    /**
+     * One MongoDB collection as seen by the Live Schema Inspector.
+     * {@code modelNote} explains the document-modeling choice (embedded arrays vs. ObjectId references).
+     */
+    public record CollectionDiagnostic(
+            String collectionName,
             boolean exists,
-            int rowCount,
+            long documentCount,
+            int indexCount,
+            boolean hasJsonSchemaValidator,
+            String modelNote,
             String statusNote
     ) {}
 
+    /**
+     * Full read-only diagnostic snapshot: cluster type (Atlas vs. local), server version,
+     * ping latency, dbStats, every expected collection with live counts, and index names.
+     */
     public record ExtendedDbStatus(
             DbStatus baseStatus,
-            String mysqlVersion,
+            String serverVersion,
             long pingLatencyMs,
-            List<TableDiagnostic> requiredTables,
-            int availableTableCount,
-            int totalRequiredTables
-    ) {}
+            List<CollectionDiagnostic> collections,
+            int availableCollectionCount,
+            int totalRequiredCollections,
+            String clusterType,
+            java.util.Map<String, Object> dbStats,
+            java.util.Map<String, List<String>> indexesByCollection
+    ) {
+        public static ExtendedDbStatus unavailable(DbStatus base, String reason) {
+            if (base.getLastError() == null) base.setLastError(reason);
+            return new ExtendedDbStatus(base, "Unavailable", -1, List.of(), 0, 0,
+                    base.getClusterType() != null ? base.getClusterType() : "Unknown",
+                    java.util.Map.of(), java.util.Map.of());
+        }
+    }
 
     public record ReportFilter(
             String academicYear,

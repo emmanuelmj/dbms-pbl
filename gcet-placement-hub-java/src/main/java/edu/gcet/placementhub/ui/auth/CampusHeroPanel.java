@@ -2,6 +2,7 @@ package edu.gcet.placementhub.ui.auth;
 
 import edu.gcet.placementhub.config.ThemeManager;
 import edu.gcet.placementhub.models.PortalCategory;
+import edu.gcet.placementhub.utils.ResourceLoader;
 import edu.gcet.placementhub.utils.UiComponents.ActionButton;
 import edu.gcet.placementhub.utils.UiComponents.BadgeLabel;
 

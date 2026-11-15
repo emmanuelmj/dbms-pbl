@@ -1,20 +1,36 @@
 package edu.gcet.placementhub.services;
 
-import edu.gcet.placementhub.dao.*;
+import com.mongodb.MongoException;
+import com.mongodb.client.MongoDatabase;
+import edu.gcet.placementhub.dao.ApplicationDao;
+import edu.gcet.placementhub.dao.AuditLogDao;
+import edu.gcet.placementhub.dao.FacultyDao;
+import edu.gcet.placementhub.dao.SkillDao;
+import edu.gcet.placementhub.dao.StudentDao;
 import edu.gcet.placementhub.database.DatabaseConnection;
-import edu.gcet.placementhub.models.*;
+import edu.gcet.placementhub.database.DatabaseException;
+import edu.gcet.placementhub.models.Application;
+import edu.gcet.placementhub.models.Faculty;
+import edu.gcet.placementhub.models.Skill;
+import edu.gcet.placementhub.models.Student;
+import edu.gcet.placementhub.models.StudentCertification;
+import edu.gcet.placementhub.models.StudentInternship;
+import edu.gcet.placementhub.models.StudentProject;
+import edu.gcet.placementhub.models.User;
+import edu.gcet.placementhub.models.UserRole;
 import edu.gcet.placementhub.utils.DeptNormalizer;
+import edu.gcet.placementhub.utils.OperationResult;
 import edu.gcet.placementhub.utils.PasswordHasher;
 
-import java.sql.Connection;
-import java.sql.SQLException;
 import java.time.LocalDate;
-import java.util.*;
+import java.util.List;
+import java.util.Locale;
+import java.util.UUID;
 
 /**
- * Pure JDBC Phase 3 business logic for Student Directory, Individual Profiles,
+ * MongoDB-backed business logic for Student Directory, Individual Profiles,
  * Technical Skills Matrix, Projects, Certifications, Internships, and Faculty Directory.
- * Enforces exact RBAC and faculty department authorization rules from server/routes.ts.
+ * Enforces RBAC and faculty department authorization rules.
  */
 public class StudentManagementService {
 
@@ -23,26 +39,6 @@ public class StudentManagementService {
     private final FacultyDao facultyDao = new FacultyDao();
     private final ApplicationDao applicationDao = new ApplicationDao();
     private final AuditLogDao auditLogDao = new AuditLogDao();
-
-    public static class OperationResult<T> {
-        public final boolean success;
-        public final String message;
-        public final T data;
-
-        public OperationResult(boolean success, String message, T data) {
-            this.success = success;
-            this.message = message;
-            this.data = data;
-        }
-
-        public static <T> OperationResult<T> ok(String msg, T data) {
-            return new OperationResult<>(true, msg, data);
-        }
-
-        public static <T> OperationResult<T> fail(String msg) {
-            return new OperationResult<>(false, msg, null);
-        }
-    }
 
     public static class DirectoryBundle {
         public final List<Student> students;
@@ -59,19 +55,20 @@ public class StudentManagementService {
     }
 
     public DirectoryBundle loadDirectoryBundle(User currentUser) {
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
             List<Student> students;
             if (currentUser != null && currentUser.getRole() == UserRole.STUDENT && currentUser.getStudentRollNumber() != null) {
-                Student single = studentDao.findByIdOrRoll(conn, currentUser.getStudentRollNumber());
+                Student single = studentDao.findByIdOrRoll(db, currentUser.getStudentRollNumber());
                 students = single != null ? List.of(single) : List.of();
             } else {
-                students = studentDao.findAll(conn);
+                students = studentDao.findAll(db);
             }
-            List<Skill> skills = skillDao.findAllSkills(conn);
-            List<Application> applications = applicationDao.findAllForUser(conn, currentUser);
+            List<Skill> skills = skillDao.findAllSkills(db);
+            List<Application> applications = applicationDao.findAllForUser(db, currentUser);
             return new DirectoryBundle(students, skills, applications, null);
-        } catch (SQLException ex) {
-            return new DirectoryBundle(List.of(), List.of(), List.of(), "MySQL query failed: " + ex.getMessage());
+        } catch (DatabaseException | MongoException ex) {
+            return new DirectoryBundle(List.of(), List.of(), List.of(), "MongoDB query failed: " + ex.getMessage());
         }
     }
 
@@ -79,10 +76,11 @@ public class StudentManagementService {
         if (actor == null) {
             return OperationResult.fail("Authentication required.");
         }
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            List<Faculty> list = facultyDao.findAll(conn);
-            return OperationResult.ok("Loaded faculty directory from MySQL.", list);
-        } catch (SQLException ex) {
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            List<Faculty> list = facultyDao.findAll(db);
+            return OperationResult.ok("Loaded faculty directory from MongoDB.", list);
+        } catch (DatabaseException | MongoException ex) {
             return OperationResult.fail("Failed to load faculty directory: " + ex.getMessage());
         }
     }
@@ -98,13 +96,9 @@ public class StudentManagementService {
 
         String cleanRoll = draft.getRollNumber().trim().toUpperCase(Locale.ROOT);
         String cleanEmail = draft.getEmail().trim().toLowerCase(Locale.ROOT);
-        String studentId = "stu-" + UUID.randomUUID();
-        String userId = "usr-" + UUID.randomUUID();
         int gradYear = draft.getGraduationYear() > 0 ? draft.getGraduationYear() : 2026;
         String tail = cleanRoll.length() >= 4 ? cleanRoll.substring(cleanRoll.length() - 4) : cleanRoll;
 
-        draft.setId(studentId);
-        draft.setUserId(userId);
         draft.setRollNumber(cleanRoll);
         draft.setEmail(cleanEmail);
         draft.setFullName(draft.getFullName().trim());
@@ -120,31 +114,23 @@ public class StudentManagementService {
         String rawPw = !isBlank(plainPassword) ? plainPassword : "student123";
         String[] hashPair = PasswordHasher.hashWithBCrypt(rawPw);
 
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            if (studentDao.existsByRollOrEmail(conn, cleanRoll, cleanEmail)) {
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            if (studentDao.existsByRollOrEmail(db, cleanRoll, cleanEmail)) {
                 return OperationResult.fail("A student with roll number " + cleanRoll + " or email " + cleanEmail + " already exists.");
             }
-            conn.setAutoCommit(false);
-            try {
-                studentDao.insertStudentWithUser(conn, draft, hashPair[0], hashPair[1]);
-                auditLogDao.insertLog(
-                        conn,
-                        "STUDENT_CREATED",
-                        actor.getId(),
-                        actor.getUsername(),
-                        actor.getRole().name(),
-                        "Added student " + draft.getFullName() + " (" + cleanRoll + ") in MySQL."
-                );
-                conn.commit();
-                return OperationResult.ok("Enrolled " + draft.getFullName() + " (" + cleanRoll + ") into MySQL.", studentId);
-            } catch (SQLException txEx) {
-                conn.rollback();
-                throw txEx;
-            } finally {
-                conn.setAutoCommit(true);
-            }
-        } catch (SQLException ex) {
-            return OperationResult.fail("MySQL enrollment failed: " + ex.getMessage());
+            studentDao.insertStudentWithUser(db, draft, hashPair[0], hashPair[1]);
+            auditLogDao.insertLog(
+                    db,
+                    "STUDENT_CREATED",
+                    actor.getId(),
+                    actor.getUsername(),
+                    actor.getRole().name(),
+                    "Added student " + draft.getFullName() + " (" + cleanRoll + ") in MongoDB."
+            );
+            return OperationResult.ok("Enrolled " + draft.getFullName() + " (" + cleanRoll + ") into MongoDB.", draft.getId());
+        } catch (DatabaseException | MongoException ex) {
+            return OperationResult.fail("MongoDB enrollment failed: " + ex.getMessage());
         }
     }
 
@@ -153,10 +139,11 @@ public class StudentManagementService {
         if (actor.getRole() == UserRole.COMPANY) {
             return OperationResult.fail("Recruiters cannot modify student records.");
         }
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            Student existing = studentDao.findByIdOrRoll(conn, updated.getId());
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            Student existing = studentDao.findByIdOrRoll(db, updated.getId());
             if (existing == null) {
-                return OperationResult.fail("Student not found in MySQL.");
+                return OperationResult.fail("Student not found in MongoDB.");
             }
             boolean isSelfStudent = actor.getRole() == UserRole.STUDENT;
             if (isSelfStudent && (actor.getStudentRollNumber() == null
@@ -165,17 +152,17 @@ public class StudentManagementService {
             }
 
             updated.setId(existing.getId());
-            studentDao.updateStudent(conn, updated, isSelfStudent);
+            studentDao.updateStudent(db, updated, isSelfStudent);
             auditLogDao.insertLog(
-                    conn,
+                    db,
                     "STUDENT_UPDATED",
                     actor.getId(),
                     actor.getUsername(),
                     actor.getRole().name(),
                     "Updated student record " + existing.getFullName() + " (" + existing.getRollNumber() + ")."
             );
-            return OperationResult.ok("Updated profile for " + existing.getFullName() + " in MySQL.", null);
-        } catch (SQLException ex) {
+            return OperationResult.ok("Updated profile for " + existing.getFullName() + " in MongoDB.", null);
+        } catch (DatabaseException | MongoException ex) {
             return OperationResult.fail("Failed to update student: " + ex.getMessage());
         }
     }
@@ -184,37 +171,29 @@ public class StudentManagementService {
         if (actor == null || !actor.getRole().isPrivilegedRole()) {
             return OperationResult.fail("Only authorized placement administrators may delete student records.");
         }
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            Student existing = studentDao.findByIdOrRoll(conn, studentId);
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            Student existing = studentDao.findByIdOrRoll(db, studentId);
             if (existing == null) {
-                return OperationResult.fail("Student not found in MySQL.");
+                return OperationResult.fail("Student not found in MongoDB.");
             }
-            int appCount = studentDao.countApplicationsForStudent(conn, existing.getId());
+            int appCount = studentDao.countApplicationsForStudent(db, existing.getId());
             if (appCount > 0) {
                 return OperationResult.fail("Cannot delete " + existing.getFullName()
                         + ": " + appCount + " placement application record(s) reference this student.");
             }
 
-            conn.setAutoCommit(false);
-            try {
-                studentDao.deleteStudentCascade(conn, existing.getId(), existing.getRollNumber());
-                auditLogDao.insertLog(
-                        conn,
-                        "STUDENT_DELETED",
-                        actor.getId(),
-                        actor.getUsername(),
-                        actor.getRole().name(),
-                        "Removed student " + existing.getFullName() + " (" + existing.getRollNumber() + ") from MySQL."
-                );
-                conn.commit();
-                return OperationResult.ok("Deleted " + existing.getFullName() + " from MySQL.", null);
-            } catch (SQLException txEx) {
-                conn.rollback();
-                throw txEx;
-            } finally {
-                conn.setAutoCommit(true);
-            }
-        } catch (SQLException ex) {
+            studentDao.deleteStudentCascade(db, existing.getId(), existing.getRollNumber());
+            auditLogDao.insertLog(
+                    db,
+                    "STUDENT_DELETED",
+                    actor.getId(),
+                    actor.getUsername(),
+                    actor.getRole().name(),
+                    "Removed student " + existing.getFullName() + " (" + existing.getRollNumber() + ") from MongoDB."
+            );
+            return OperationResult.ok("Deleted " + existing.getFullName() + " from MongoDB.", null);
+        } catch (DatabaseException | MongoException ex) {
             return OperationResult.fail("Delete failed: " + ex.getMessage());
         }
     }
@@ -230,8 +209,9 @@ public class StudentManagementService {
         if (actor.getRole() == UserRole.COMPANY) {
             return OperationResult.fail("Recruiters cannot modify student skills.");
         }
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            Student student = studentDao.findByIdOrRoll(conn, studentId);
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            Student student = studentDao.findByIdOrRoll(db, studentId);
             if (student == null) return OperationResult.fail("Student not found.");
 
             if (actor.getRole() == UserRole.STUDENT
@@ -244,18 +224,20 @@ public class StudentManagementService {
                 return OperationResult.fail("Unauthorized Department: You are not assigned to verify skills for branch \"" + student.getBranch() + "\".");
             }
 
-            boolean canVerify = actor.getRole() != UserRole.STUDENT && markVerified;
-            studentDao.upsertStudentSkill(conn, student.getId(), skillId, proficiency, canVerify, actor.getId());
+            studentDao.upsertStudentSkill(db, student.getId(), skillId, proficiency);
+            if (markVerified && actor.getRole() != UserRole.STUDENT) {
+                studentDao.verifyStudentSkill(db, student.getId(), skillId, actor.getId());
+            }
             auditLogDao.insertLog(
-                    conn,
+                    db,
                     "STUDENT_SKILL_UPDATED",
                     actor.getId(),
                     actor.getUsername(),
                     actor.getRole().name(),
                     "Updated skill " + skillId + " (proficiency " + proficiency + ") for " + student.getRollNumber() + "."
             );
-            return OperationResult.ok("Saved skill proficiency (Level " + proficiency + ") in MySQL.", null);
-        } catch (SQLException ex) {
+            return OperationResult.ok("Saved skill proficiency (Level " + proficiency + ") in MongoDB.", null);
+        } catch (DatabaseException | MongoException ex) {
             return OperationResult.fail("Failed to update skill: " + ex.getMessage());
         }
     }
@@ -264,8 +246,9 @@ public class StudentManagementService {
         if (actor == null || actor.getRole() == UserRole.STUDENT || actor.getRole() == UserRole.COMPANY) {
             return OperationResult.fail("Only faculty or placement officers can verify student skills.");
         }
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            Student student = studentDao.findByIdOrRoll(conn, studentId);
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            Student student = studentDao.findByIdOrRoll(db, studentId);
             if (student == null) return OperationResult.fail("Student not found.");
 
             if (actor.getRole() == UserRole.FACULTY
@@ -273,17 +256,17 @@ public class StudentManagementService {
                 return OperationResult.fail("Unauthorized Department: You are not assigned to verify skills for branch \"" + student.getBranch() + "\".");
             }
 
-            studentDao.verifyStudentSkill(conn, student.getId(), skillId, actor.getId());
+            studentDao.verifyStudentSkill(db, student.getId(), skillId, actor.getId());
             auditLogDao.insertLog(
-                    conn,
+                    db,
                     "SKILL_VERIFIED",
                     actor.getId(),
                     actor.getUsername(),
                     actor.getRole().name(),
                     "Verified skill " + skillId + " for " + student.getFullName() + " (" + student.getRollNumber() + ")."
             );
-            return OperationResult.ok("Skill verified by faculty and persisted in MySQL.", null);
-        } catch (SQLException ex) {
+            return OperationResult.ok("Skill verified by faculty and persisted in MongoDB.", null);
+        } catch (DatabaseException | MongoException ex) {
             return OperationResult.fail("Verification failed: " + ex.getMessage());
         }
     }
@@ -295,8 +278,9 @@ public class StudentManagementService {
         if (project == null || isBlank(project.getTitle())) {
             return OperationResult.fail("Project title is required.");
         }
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            Student student = studentDao.findByIdOrRoll(conn, studentId);
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            Student student = studentDao.findByIdOrRoll(db, studentId);
             if (student == null) return OperationResult.fail("Student not found.");
 
             if (actor.getRole() == UserRole.STUDENT
@@ -305,20 +289,19 @@ public class StudentManagementService {
                 return OperationResult.fail("You may only add projects to your own profile.");
             }
 
-            project.setId("proj-" + UUID.randomUUID());
             project.setStudentId(student.getId());
             project.setTitle(project.getTitle().trim());
-            studentDao.insertProject(conn, project);
+            studentDao.insertProject(db, project);
             auditLogDao.insertLog(
-                    conn,
+                    db,
                     "PROJECT_ADDED",
                     actor.getId(),
                     actor.getUsername(),
                     actor.getRole().name(),
                     "Added project \"" + project.getTitle() + "\" for " + student.getRollNumber() + "."
             );
-            return OperationResult.ok("Added project \"" + project.getTitle() + "\" to MySQL.", null);
-        } catch (SQLException ex) {
+            return OperationResult.ok("Added project \"" + project.getTitle() + "\" to MongoDB.", null);
+        } catch (DatabaseException | MongoException ex) {
             return OperationResult.fail("Failed to add project: " + ex.getMessage());
         }
     }
@@ -327,15 +310,16 @@ public class StudentManagementService {
         if (!canEditPortfolio(actor, studentId)) {
             return OperationResult.fail("Not authorized to remove projects from this profile.");
         }
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            Student student = studentDao.findByIdOrRoll(conn, studentId);
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            Student student = studentDao.findByIdOrRoll(db, studentId);
             if (student == null) return OperationResult.fail("Student not found.");
             if (!canAccessSpecificStudent(actor, student)) {
                 return OperationResult.fail("You may only modify your own portfolio.");
             }
-            studentDao.deleteProject(conn, projectId, student.getId());
-            return OperationResult.ok("Project removed from MySQL.", null);
-        } catch (SQLException ex) {
+            studentDao.deleteProject(db, projectId, student.getId());
+            return OperationResult.ok("Project removed from MongoDB.", null);
+        } catch (DatabaseException | MongoException ex) {
             return OperationResult.fail("Failed to remove project: " + ex.getMessage());
         }
     }
@@ -347,14 +331,14 @@ public class StudentManagementService {
         if (cert == null || isBlank(cert.getName()) || isBlank(cert.getIssuingOrg())) {
             return OperationResult.fail("Certification name and issuing organization are required.");
         }
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            Student student = studentDao.findByIdOrRoll(conn, studentId);
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            Student student = studentDao.findByIdOrRoll(db, studentId);
             if (student == null) return OperationResult.fail("Student not found.");
             if (!canAccessSpecificStudent(actor, student)) {
                 return OperationResult.fail("You may only add certifications to your own profile.");
             }
 
-            cert.setId("cert-" + UUID.randomUUID());
             cert.setStudentId(student.getId());
             cert.setName(cert.getName().trim());
             cert.setIssuingOrg(cert.getIssuingOrg().trim());
@@ -363,17 +347,17 @@ public class StudentManagementService {
             } else {
                 cert.setIssueDate(cert.getIssueDate().trim());
             }
-            studentDao.insertCertification(conn, cert);
+            studentDao.insertCertification(db, cert);
             auditLogDao.insertLog(
-                    conn,
+                    db,
                     "CERTIFICATION_ADDED",
                     actor.getId(),
                     actor.getUsername(),
                     actor.getRole().name(),
                     "Added certification \"" + cert.getName() + "\" for " + student.getRollNumber() + "."
             );
-            return OperationResult.ok("Added certification \"" + cert.getName() + "\" to MySQL.", null);
-        } catch (SQLException ex) {
+            return OperationResult.ok("Added certification \"" + cert.getName() + "\" to MongoDB.", null);
+        } catch (DatabaseException | MongoException ex) {
             return OperationResult.fail("Failed to add certification: " + ex.getMessage());
         }
     }
@@ -382,15 +366,16 @@ public class StudentManagementService {
         if (!canEditPortfolio(actor, studentId)) {
             return OperationResult.fail("Not authorized to remove certifications.");
         }
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            Student student = studentDao.findByIdOrRoll(conn, studentId);
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            Student student = studentDao.findByIdOrRoll(db, studentId);
             if (student == null) return OperationResult.fail("Student not found.");
             if (!canAccessSpecificStudent(actor, student)) {
                 return OperationResult.fail("You may only modify your own portfolio.");
             }
-            studentDao.deleteCertification(conn, certId, student.getId());
-            return OperationResult.ok("Certification removed from MySQL.", null);
-        } catch (SQLException ex) {
+            studentDao.deleteCertification(db, certId, student.getId());
+            return OperationResult.ok("Certification removed from MongoDB.", null);
+        } catch (DatabaseException | MongoException ex) {
             return OperationResult.fail("Failed to remove certification: " + ex.getMessage());
         }
     }
@@ -402,29 +387,29 @@ public class StudentManagementService {
         if (internship == null || isBlank(internship.getCompanyName()) || isBlank(internship.getRole()) || isBlank(internship.getDuration())) {
             return OperationResult.fail("Company Name, Role, and Duration are required.");
         }
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            Student student = studentDao.findByIdOrRoll(conn, studentId);
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            Student student = studentDao.findByIdOrRoll(db, studentId);
             if (student == null) return OperationResult.fail("Student not found.");
             if (!canAccessSpecificStudent(actor, student)) {
                 return OperationResult.fail("You may only add internships to your own profile.");
             }
 
-            internship.setId("int-" + UUID.randomUUID());
             internship.setStudentId(student.getId());
             internship.setCompanyName(internship.getCompanyName().trim());
             internship.setRole(internship.getRole().trim());
             internship.setDuration(internship.getDuration().trim());
-            studentDao.insertInternship(conn, internship);
+            studentDao.insertInternship(db, internship);
             auditLogDao.insertLog(
-                    conn,
+                    db,
                     "INTERNSHIP_ADDED",
                     actor.getId(),
                     actor.getUsername(),
                     actor.getRole().name(),
                     "Added internship at " + internship.getCompanyName() + " for " + student.getRollNumber() + "."
             );
-            return OperationResult.ok("Added internship at " + internship.getCompanyName() + " to MySQL.", null);
-        } catch (SQLException ex) {
+            return OperationResult.ok("Added internship at " + internship.getCompanyName() + " to MongoDB.", null);
+        } catch (DatabaseException | MongoException ex) {
             return OperationResult.fail("Failed to add internship: " + ex.getMessage());
         }
     }
@@ -433,15 +418,16 @@ public class StudentManagementService {
         if (!canEditPortfolio(actor, studentId)) {
             return OperationResult.fail("Not authorized to remove internships.");
         }
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            Student student = studentDao.findByIdOrRoll(conn, studentId);
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            Student student = studentDao.findByIdOrRoll(db, studentId);
             if (student == null) return OperationResult.fail("Student not found.");
             if (!canAccessSpecificStudent(actor, student)) {
                 return OperationResult.fail("You may only modify your own portfolio.");
             }
-            studentDao.deleteInternship(conn, internshipId, student.getId());
-            return OperationResult.ok("Internship removed from MySQL.", null);
-        } catch (SQLException ex) {
+            studentDao.deleteInternship(db, internshipId, student.getId());
+            return OperationResult.ok("Internship removed from MongoDB.", null);
+        } catch (DatabaseException | MongoException ex) {
             return OperationResult.fail("Failed to remove internship: " + ex.getMessage());
         }
     }
@@ -453,25 +439,24 @@ public class StudentManagementService {
         if (skill == null || isBlank(skill.getName()) || isBlank(skill.getCategory())) {
             return OperationResult.fail("Skill name and category are required.");
         }
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            if (skillDao.existsByName(conn, skill.getName())) {
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            if (skillDao.existsByName(db, skill.getName())) {
                 return OperationResult.fail("Skill \"" + skill.getName().trim() + "\" already exists.");
             }
-            String id = "sk-" + UUID.randomUUID();
-            skill.setId(id);
             skill.setName(skill.getName().trim());
             skill.setCategory(skill.getCategory().trim());
-            skillDao.insertSkill(conn, skill);
+            String id = skillDao.insertSkill(db, skill);
             auditLogDao.insertLog(
-                    conn,
+                    db,
                     "SKILL_CREATED",
                     actor.getId(),
                     actor.getUsername(),
                     actor.getRole().name(),
                     "Added competency \"" + skill.getName() + "\" to Skill Matrix."
             );
-            return OperationResult.ok("Added " + skill.getName() + " to MySQL skills catalog.", id);
-        } catch (SQLException ex) {
+            return OperationResult.ok("Added " + skill.getName() + " to MongoDB skills catalog.", id);
+        } catch (DatabaseException | MongoException ex) {
             return OperationResult.fail("Failed to create skill: " + ex.getMessage());
         }
     }
@@ -483,19 +468,20 @@ public class StudentManagementService {
         if (skill == null || isBlank(skill.getId()) || isBlank(skill.getName())) {
             return OperationResult.fail("Skill ID and name are required.");
         }
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
             skill.setName(skill.getName().trim());
-            skillDao.updateSkill(conn, skill);
+            skillDao.updateSkill(db, skill);
             auditLogDao.insertLog(
-                    conn,
+                    db,
                     "SKILL_UPDATED",
                     actor.getId(),
                     actor.getUsername(),
                     actor.getRole().name(),
                     "Updated skill " + skill.getName() + " (" + skill.getId() + ")."
             );
-            return OperationResult.ok("Saved changes to " + skill.getName() + " in MySQL.", null);
-        } catch (SQLException ex) {
+            return OperationResult.ok("Saved changes to " + skill.getName() + " in MongoDB.", null);
+        } catch (DatabaseException | MongoException ex) {
             return OperationResult.fail("Failed to update skill: " + ex.getMessage());
         }
     }
@@ -504,24 +490,25 @@ public class StudentManagementService {
         if (!canManageSkillCatalog(actor)) {
             return OperationResult.fail("Only faculty coordinators or placement officers can delete skills.");
         }
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            int ssCount = skillDao.countStudentReferences(conn, skill.getId());
-            int drCount = skillDao.countDriveReferences(conn, skill.getId());
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            int ssCount = skillDao.countStudentReferences(db, skill.getId());
+            int drCount = skillDao.countDriveReferences(db, skill.getId());
             if (ssCount > 0 || drCount > 0) {
                 return OperationResult.fail("Cannot delete skill: referenced by " + ssCount
                         + " student skill(s) and " + drCount + " placement drive(s).");
             }
-            skillDao.deleteSkill(conn, skill.getId());
+            skillDao.deleteSkill(db, skill.getId());
             auditLogDao.insertLog(
-                    conn,
+                    db,
                     "SKILL_DELETED",
                     actor.getId(),
                     actor.getUsername(),
                     actor.getRole().name(),
                     "Deleted skill " + skill.getName() + " (" + skill.getId() + ")."
             );
-            return OperationResult.ok("Removed " + skill.getName() + " from MySQL skills catalog.", null);
-        } catch (SQLException ex) {
+            return OperationResult.ok("Removed " + skill.getName() + " from MongoDB skills catalog.", null);
+        } catch (DatabaseException | MongoException ex) {
             return OperationResult.fail("Cannot delete skill: " + ex.getMessage());
         }
     }

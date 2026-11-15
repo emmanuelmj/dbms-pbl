@@ -87,6 +87,7 @@ public class MainFrame extends JFrame {
     private DbStatus latestDbStatus;
     private String currentPageId = "dashboard";
     private String selectedDriveId;
+    private boolean connectionDialogShown = false;
 
     public MainFrame() {
         super("GCET PLACEMENT HUB — Smart Placement Cell & Skill Matrix Portal");
@@ -715,6 +716,22 @@ public class MainFrame extends JFrame {
             }
             if (loginPanel != null) {
                 loginPanel.updateDbStatus(status);
+            }
+            if (status != null && !status.isConnected() && !connectionDialogShown) {
+                // Never crash on an unreachable Atlas cluster / offline Wi-Fi: explain and offer a retry
+                connectionDialogShown = true;
+                edu.gcet.placementhub.ui.shell.ConnectionErrorDialog.show(
+                        this,
+                        status,
+                        () -> {
+                            connectionDialogShown = false;
+                            edu.gcet.placementhub.database.DatabaseConnection.getInstance().reconnect();
+                            refreshDbHealth();
+                        },
+                        this::openDbDiagnosticsDialog
+                );
+            } else if (status != null && status.isConnected()) {
+                connectionDialogShown = false;
             }
         });
     }

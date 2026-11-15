@@ -1,8 +1,18 @@
 package edu.gcet.placementhub.services;
 
+import com.mongodb.client.AggregateIterable;
+import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoDatabase;
+import com.mongodb.client.model.Accumulators;
+import com.mongodb.client.model.Aggregates;
+import com.mongodb.client.model.Filters;
+import com.mongodb.client.model.Projections;
+import com.mongodb.client.model.Sorts;
 import edu.gcet.placementhub.models.*;
 import edu.gcet.placementhub.models.PlacementModels.*;
 import edu.gcet.placementhub.utils.DeptNormalizer;
+import org.bson.Document;
+import org.bson.conversions.Bson;
 
 import java.time.LocalDate;
 import java.util.*;
@@ -461,5 +471,139 @@ public final class PlacementEngine {
         }
         return "Upskill in " + skillName + " from Level " + studentProf + " (" + PlacementModels.proficiencyLabel(studentProf)
                 + ") to target Level " + requiredProf + " (" + PlacementModels.proficiencyLabel(requiredProf) + ").";
+    }
+
+    // -------------------------------------------------------------------------
+    // REAL MONGODB AGGREGATION PIPELINES ($match, $project, $sort)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Real MongoDB Aggregation Pipeline for Placement Drive Eligibility Screening.
+     * Evaluates $match on academicMetrics (CGPA, backlogs, grad year, branches) and
+     * $project computing match scores directly within the database engine.
+     */
+    public static List<Bson> buildEligibilityPipeline(PlacementDrive drive) {
+        List<Bson> matchConditions = new ArrayList<>();
+        matchConditions.add(Filters.gte("academicMetrics.cgpa", drive.getMinCgpa()));
+        matchConditions.add(Filters.lte("academicMetrics.backlogs", drive.getMaxBacklogs()));
+        if (drive.getTargetGradYear() > 0) {
+            matchConditions.add(Filters.eq("academicMetrics.graduationYear", drive.getTargetGradYear()));
+        }
+        matchConditions.add(Filters.in("approvalStatus", List.of("APPROVED", "ACTIVE")));
+
+        if (drive.getEligibleBranches() != null && !drive.getEligibleBranches().isEmpty()) {
+            matchConditions.add(Filters.in("branch", drive.getEligibleBranches()));
+        }
+
+        return List.of(
+                Aggregates.match(Filters.and(matchConditions)),
+                Aggregates.project(Projections.fields(
+                        Projections.include("rollNumber", "fullName", "email", "branch", "placementStatus"),
+                        Projections.computed("cgpa", "$academicMetrics.cgpa"),
+                        Projections.computed("backlogs", "$academicMetrics.backlogs"),
+                        Projections.computed("skillsCount", new Document("$size", new Document("$ifNull", List.of("$skills", List.of()))))
+                )),
+                Aggregates.sort(Sorts.descending("cgpa"))
+        );
+    }
+
+    public static List<Document> executeEligibilityPipeline(MongoDatabase db, PlacementDrive drive) {
+        if (db == null || drive == null) return List.of();
+        MongoCollection<Document> col = db.getCollection("students");
+        List<Document> result = new ArrayList<>();
+        col.aggregate(buildEligibilityPipeline(drive)).into(result);
+        return result;
+    }
+
+    public static String explainEligibilityPipeline(MongoDatabase db, PlacementDrive drive) {
+        if (db == null || drive == null) return "{}";
+        return explainPipeline(db, "students", buildEligibilityPipeline(drive));
+    }
+
+    // -------------------------------------------------------------------------
+    // SKILL-GAP AGGREGATION ($match -> $project with $setIntersection / $setDifference -> $lookup -> $sort)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Real MongoDB skill-gap pipeline for one drive. The set algebra runs inside the database engine:
+     * <pre>
+     *   matchedSkillIds = $setIntersection( students.skills.skillId , drive.requiredSkills.skillId )
+     *   missingSkillIds = $setDifference  ( drive.requiredSkills.skillId , students.skills.skillId )
+     *   readinessPct    = matched / required * 100
+     * </pre>
+     * A trailing {@code $lookup} on the referenced {@code skills} catalog resolves the missing ids to names.
+     */
+    public static List<Bson> buildSkillGapPipeline(PlacementDrive drive) {
+        List<Object> requiredIds = new ArrayList<>();
+        List<Object> mandatoryIds = new ArrayList<>();
+        if (drive != null && drive.getRequiredSkills() != null) {
+            for (DriveRequiredSkill r : drive.getRequiredSkills()) {
+                if (r == null || r.getSkillId() == null) continue;
+                Object key = edu.gcet.placementhub.database.BsonUtil.toKey(r.getSkillId());
+                requiredIds.add(key);
+                if (r.isMandatory()) mandatoryIds.add(key);
+            }
+        }
+        int requiredCount = Math.max(1, requiredIds.size());
+
+        List<Bson> matchConditions = new ArrayList<>();
+        matchConditions.add(Filters.in("approvalStatus", List.of("APPROVED", "ACTIVE")));
+        if (drive != null && drive.getEligibleBranches() != null && !drive.getEligibleBranches().isEmpty()) {
+            matchConditions.add(Filters.in("branch", drive.getEligibleBranches()));
+        }
+
+        Document studentSkillIds = new Document("$ifNull", List.of("$skills.skillId", List.of()));
+        Document matched = new Document("$setIntersection", List.of(studentSkillIds, requiredIds));
+        Document missing = new Document("$setDifference", List.of(requiredIds, studentSkillIds));
+        Document missingMandatory = new Document("$setDifference", List.of(mandatoryIds, studentSkillIds));
+
+        return List.of(
+                Aggregates.match(Filters.and(matchConditions)),
+                Aggregates.project(Projections.fields(
+                        Projections.include("rollNumber", "fullName", "branch", "placementStatus"),
+                        Projections.computed("cgpa", "$academicMetrics.cgpa"),
+                        Projections.computed("matchedSkillIds", matched),
+                        Projections.computed("missingSkillIds", missing),
+                        Projections.computed("missingMandatoryIds", missingMandatory)
+                )),
+                Aggregates.addFields(
+                        new com.mongodb.client.model.Field<>("matchedCount", new Document("$size", "$matchedSkillIds")),
+                        new com.mongodb.client.model.Field<>("missingCount", new Document("$size", "$missingSkillIds")),
+                        new com.mongodb.client.model.Field<>("mandatoryGapCount", new Document("$size", "$missingMandatoryIds")),
+                        new com.mongodb.client.model.Field<>("readinessPct", new Document("$round", List.of(
+                                new Document("$multiply", List.of(
+                                        new Document("$divide", List.of(new Document("$size", "$matchedSkillIds"), requiredCount)),
+                                        100)), 0)))
+                ),
+                Aggregates.lookup("skills", "missingSkillIds", "_id", "missingSkillDocs"),
+                Aggregates.addFields(new com.mongodb.client.model.Field<>("missingSkillNames", "$missingSkillDocs.name")),
+                Aggregates.project(Projections.exclude("missingSkillDocs")),
+                Aggregates.sort(Sorts.orderBy(Sorts.descending("readinessPct"), Sorts.descending("cgpa")))
+        );
+    }
+
+    public static List<Document> executeSkillGapPipeline(MongoDatabase db, PlacementDrive drive) {
+        if (db == null || drive == null) return List.of();
+        List<Document> result = new ArrayList<>();
+        db.getCollection("students").aggregate(buildSkillGapPipeline(drive)).into(result);
+        return result;
+    }
+
+    public static String explainSkillGapPipeline(MongoDatabase db, PlacementDrive drive) {
+        if (db == null || drive == null) return "{}";
+        return explainPipeline(db, "students", buildSkillGapPipeline(drive));
+    }
+
+    /** Runs {@code explain} with verbosity executionStats for any pipeline and returns the plan as JSON. */
+    public static String explainPipeline(MongoDatabase db, String collection, List<? extends Bson> pipeline) {
+        try {
+            Document cmd = new Document("explain", new Document("aggregate", collection)
+                    .append("pipeline", edu.gcet.placementhub.database.BsonUtil.toDocuments(pipeline))
+                    .append("cursor", new Document()))
+                    .append("verbosity", "executionStats");
+            return db.runCommand(cmd).toJson();
+        } catch (Exception ex) {
+            return "{\"error\": \"" + String.valueOf(ex.getMessage()).replace("\"", "'") + "\"}";
+        }
     }
 }

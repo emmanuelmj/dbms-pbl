@@ -1,194 +1,139 @@
 package edu.gcet.placementhub.dao;
 
+import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoDatabase;
+import com.mongodb.client.model.Filters;
+import com.mongodb.client.model.Sorts;
+import com.mongodb.client.model.Updates;
+import edu.gcet.placementhub.config.DatabaseConfig;
 import edu.gcet.placementhub.models.GovernanceModels.AdminRequest;
 import edu.gcet.placementhub.models.GovernanceModels.ApprovalRecord;
 import edu.gcet.placementhub.utils.PasswordHasher;
+import org.bson.Document;
+import org.bson.conversions.Bson;
 
-import java.sql.*;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
 
+import static edu.gcet.placementhub.database.BsonUtil.*;
+
 /**
- * JDBC Data Access Object for Phase 5 Institutional Approvals:
- * - Student registration approvals (Faculty / TPO)
- * - Faculty registration approvals (Admins)
- * - Company registration approvals (Admins)
- * - Admin privilege petitions (`admin_requests`, Principal only)
- * - Immutable audit history (`approval_records`)
+ * Data Access Object for institutional approvals:
+ * <ul>
+ *   <li>{@code approvals}      - immutable decision records (student / faculty / company / admin privilege)</li>
+ *   <li>{@code admin_requests} - Principal-only privilege petitions</li>
+ * </ul>
+ * plus the cross-collection status updates on {@code students}, {@code users}, {@code faculty}, {@code companies}.
  */
 public class ApprovalDao {
 
-    public List<AdminRequest> findAllAdminRequests(Connection conn) throws SQLException {
+    public static final String APPROVALS = "approvals";
+    public static final String ADMIN_REQUESTS = "admin_requests";
+
+    public static MongoCollection<Document> approvals(MongoDatabase db) {
+        return db.getCollection(APPROVALS);
+    }
+
+    public static MongoCollection<Document> adminRequests(MongoDatabase db) {
+        return db.getCollection(ADMIN_REQUESTS);
+    }
+
+    // --------------------------------------------------------- admin requests
+
+    public List<AdminRequest> findAllAdminRequests(MongoDatabase db) {
         List<AdminRequest> list = new ArrayList<>();
-        String sql = "SELECT * FROM admin_requests ORDER BY CASE WHEN status = 'PENDING' THEN 0 ELSE 1 END, created_at DESC";
-        try (PreparedStatement ps = conn.prepareStatement(sql);
-             ResultSet rs = ps.executeQuery()) {
-            while (rs.next()) {
-                AdminRequest r = new AdminRequest();
-                r.setId(rs.getString("id"));
-                r.setUserId(rs.getString("user_id"));
-                r.setApplicantName(rs.getString("applicant_name"));
-                r.setApplicantEmail(rs.getString("applicant_email"));
-                r.setCurrentRole(rs.getString("current_role"));
-                r.setRequestedRole(rs.getString("requested_role"));
-                r.setDepartment(rs.getString("department"));
-                r.setReason(rs.getString("reason"));
-                r.setStatus(rs.getString("status"));
-                r.setDecidedBy(rs.getString("decided_by"));
-                r.setDecidedByName(rs.getString("decided_by_name"));
-                r.setDecisionNotes(rs.getString("decision_notes"));
-                Timestamp c = rs.getTimestamp("created_at");
-                if (c != null) r.setCreatedAt(c.toInstant().toString());
-                Timestamp d = rs.getTimestamp("decided_at");
-                if (d != null) r.setDecidedAt(d.toInstant().toString());
-                list.add(r);
-            }
+        List<AdminRequest> pending = new ArrayList<>();
+        List<AdminRequest> others = new ArrayList<>();
+        for (Document d : adminRequests(db).find().sort(Sorts.descending("createdAt"))) {
+            AdminRequest r = mapAdminRequest(d);
+            if ("PENDING".equalsIgnoreCase(r.getStatus())) pending.add(r); else others.add(r);
         }
+        list.addAll(pending);
+        list.addAll(others);
         return list;
     }
 
-    public AdminRequest findAdminRequestById(Connection conn, String id) throws SQLException {
-        String sql = "SELECT * FROM admin_requests WHERE id = ? LIMIT 1";
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, id);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    AdminRequest r = new AdminRequest();
-                    r.setId(rs.getString("id"));
-                    r.setUserId(rs.getString("user_id"));
-                    r.setApplicantName(rs.getString("applicant_name"));
-                    r.setApplicantEmail(rs.getString("applicant_email"));
-                    r.setCurrentRole(rs.getString("current_role"));
-                    r.setRequestedRole(rs.getString("requested_role"));
-                    r.setDepartment(rs.getString("department"));
-                    r.setReason(rs.getString("reason"));
-                    r.setStatus(rs.getString("status"));
-                    r.setDecidedBy(rs.getString("decided_by"));
-                    r.setDecidedByName(rs.getString("decided_by_name"));
-                    r.setDecisionNotes(rs.getString("decision_notes"));
-                    Timestamp c = rs.getTimestamp("created_at");
-                    if (c != null) r.setCreatedAt(c.toInstant().toString());
-                    Timestamp d = rs.getTimestamp("decided_at");
-                    if (d != null) r.setDecidedAt(d.toInstant().toString());
-                    return r;
-                }
-            }
-        }
-        return null;
+    public AdminRequest findAdminRequestById(MongoDatabase db, String id) {
+        Document d = adminRequests(db).find(idFilter(id)).first();
+        return d == null ? null : mapAdminRequest(d);
     }
 
-    public void insertAdminRequest(Connection conn, AdminRequest req) throws SQLException {
-        String sql = """
-                INSERT INTO admin_requests (
-                  id, user_id, applicant_name, applicant_email, current_role,
-                  requested_role, department, reason, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', NOW())
-                """;
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, req.getId() != null ? req.getId() : "admreq-" + UUID.randomUUID());
-            ps.setString(2, req.getUserId());
-            ps.setString(3, req.getApplicantName());
-            ps.setString(4, req.getApplicantEmail());
-            ps.setString(5, req.getCurrentRole());
-            ps.setString(6, req.getRequestedRole());
-            ps.setString(7, req.getDepartment());
-            ps.setString(8, req.getReason());
-            ps.executeUpdate();
-        }
+    public String insertAdminRequest(MongoDatabase db, AdminRequest req) {
+        Document d = new Document();
+        if (req.getId() != null && !req.getId().isBlank()) d.append("_id", toKey(req.getId()));
+        d.append("userId", toKey(req.getUserId()))
+                .append("applicantName", req.getApplicantName())
+                .append("applicantEmail", req.getApplicantEmail())
+                .append("currentRole", req.getCurrentRole())
+                .append("requestedRole", req.getRequestedRole())
+                .append("department", req.getDepartment())
+                .append("reason", req.getReason())
+                .append("status", "PENDING")
+                .append("createdAt", now());
+        adminRequests(db).insertOne(d);
+        req.setId(id(d));
+        return req.getId();
     }
 
     public void updateAdminRequestDecision(
-            Connection conn,
+            MongoDatabase db,
             String requestId,
             String decision,
             String notes,
             String principalId,
             String principalName
-    ) throws SQLException {
-        String sql = """
-                UPDATE admin_requests
-                SET status = ?, decided_by = ?, decided_by_name = ?, decision_notes = ?, decided_at = NOW()
-                WHERE id = ?
-                """;
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, decision);
-            ps.setString(2, principalId);
-            ps.setString(3, principalName);
-            ps.setString(4, notes);
-            ps.setString(5, requestId);
-            ps.executeUpdate();
-        }
+    ) {
+        adminRequests(db).updateOne(idFilter(requestId), Updates.combine(
+                Updates.set("status", decision),
+                Updates.set("decidedBy", toKey(principalId)),
+                Updates.set("decidedByName", principalName),
+                Updates.set("decisionNotes", notes),
+                Updates.set("decidedAt", now())));
     }
 
-    public void elevateUserRole(Connection conn, String userId, String newRole) throws SQLException {
+    public void elevateUserRole(MongoDatabase db, String userId, String newRole) {
         if (userId == null || userId.isBlank() || newRole == null || newRole.isBlank()) return;
-        String sql = "UPDATE users SET role = ?, is_active = TRUE, status = 'ACTIVE' WHERE id = ?";
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, newRole);
-            ps.setString(2, userId);
-            ps.executeUpdate();
-        }
+        db.getCollection(UserDao.COLLECTION).updateOne(idFilter(userId), Updates.combine(
+                Updates.set("role", newRole),
+                Updates.set("isActive", true),
+                Updates.set("status", "ACTIVE")));
     }
 
-    public List<ApprovalRecord> findApprovalHistory(Connection conn, int limit) throws SQLException {
+    // ------------------------------------------------------- approval records
+
+    public List<ApprovalRecord> findApprovalHistory(MongoDatabase db, int limit) {
         List<ApprovalRecord> records = new ArrayList<>();
-        String sql = "SELECT * FROM approval_records ORDER BY decided_at DESC LIMIT ?";
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setInt(1, Math.max(1, limit));
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    ApprovalRecord r = new ApprovalRecord();
-                    r.setId(rs.getString("id"));
-                    r.setRequestType(rs.getString("request_type"));
-                    r.setTargetId(rs.getString("target_id"));
-                    r.setTargetName(rs.getString("target_name"));
-                    r.setStudentRollNumber(rs.getString("student_roll_number"));
-                    r.setDepartment(rs.getString("department"));
-                    r.setApproverId(rs.getString("approver_id"));
-                    r.setApproverName(rs.getString("approver_name"));
-                    r.setApproverRole(rs.getString("approver_role"));
-                    r.setDecision(rs.getString("decision"));
-                    r.setComments(rs.getString("comments"));
-                    Timestamp ts = rs.getTimestamp("decided_at");
-                    if (ts != null) r.setDecidedAt(ts.toInstant().toString());
-                    records.add(r);
-                }
-            }
+        for (Document d : approvals(db).find().sort(Sorts.descending("decidedAt")).limit(Math.max(1, limit))) {
+            records.add(mapApprovalRecord(d));
         }
         return records;
     }
 
-    public void insertApprovalRecord(Connection conn, ApprovalRecord r) throws SQLException {
-        String sql = """
-                INSERT INTO approval_records (
-                  id, request_type, target_id, target_name, student_roll_number,
-                  department, approver_id, approver_name, approver_role, decision, comments, decided_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
-                """;
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, r.getId() != null ? r.getId() : "apr-" + UUID.randomUUID());
-            ps.setString(2, r.getRequestType());
-            ps.setString(3, r.getTargetId());
-            ps.setString(4, r.getTargetName());
-            if (r.getStudentRollNumber() != null && !r.getStudentRollNumber().isBlank()) {
-                ps.setString(5, r.getStudentRollNumber());
-            } else {
-                ps.setNull(5, Types.VARCHAR);
-            }
-            ps.setString(6, r.getDepartment());
-            ps.setString(7, r.getApproverId());
-            ps.setString(8, r.getApproverName());
-            ps.setString(9, r.getApproverRole());
-            ps.setString(10, r.getDecision());
-            ps.setString(11, r.getComments());
-            ps.executeUpdate();
-        }
+    public String insertApprovalRecord(MongoDatabase db, ApprovalRecord r) {
+        Document d = new Document();
+        if (r.getId() != null && !r.getId().isBlank()) d.append("_id", toKey(r.getId()));
+        d.append("requestType", r.getRequestType())
+                .append("targetId", toKey(r.getTargetId()))
+                .append("targetName", r.getTargetName())
+                .append("studentRollNumber", nvl(r.getStudentRollNumber(), null))
+                .append("department", r.getDepartment())
+                .append("approverId", toKey(r.getApproverId()))
+                .append("approverName", r.getApproverName())
+                .append("approverRole", r.getApproverRole())
+                .append("decision", r.getDecision())
+                .append("comments", r.getComments())
+                .append("decidedAt", r.getDecidedAt() != null ? toDateOrToday(r.getDecidedAt()) : now());
+        approvals(db).insertOne(d);
+        r.setId(id(d));
+        return r.getId();
     }
 
+    // --------------------------------------------------- student approvals
+
     public void updateStudentApproval(
-            Connection conn,
+            MongoDatabase db,
             String studentId,
             String userId,
             String rollNumber,
@@ -196,56 +141,35 @@ public class ApprovalDao {
             String reason,
             String facultyId,
             String facultyName
-    ) throws SQLException {
+    ) {
         String newApproval = approve ? "APPROVED" : "REJECTED";
-        String stuSql = """
-                UPDATE students
-                SET approval_status = ?, approved_by_faculty_id = ?, approved_by_faculty_name = ?,
-                    approved_at = NOW(), rejection_reason = ?
-                WHERE id = ?
-                """;
-        try (PreparedStatement ps = conn.prepareStatement(stuSql)) {
-            ps.setString(1, newApproval);
-            ps.setString(2, facultyId);
-            ps.setString(3, facultyName);
-            if (approve) {
-                ps.setNull(4, Types.VARCHAR);
-            } else {
-                ps.setString(4, reason);
-            }
-            ps.setString(5, studentId);
-            ps.executeUpdate();
-        }
+        db.getCollection(StudentDao.COLLECTION).updateOne(idFilter(studentId), Updates.combine(
+                Updates.set("approvalStatus", newApproval),
+                Updates.set("approvedByFacultyId", toKey(facultyId)),
+                Updates.set("approvedByFacultyName", facultyName),
+                Updates.set("approvedAt", now()),
+                Updates.set("rejectionReason", approve ? null : reason),
+                Updates.set("updatedAt", now())));
 
-        String cleanUserId = userId != null ? userId.trim() : "";
-        String cleanRoll = rollNumber != null ? rollNumber.trim() : "";
-        String usrSql = """
-                UPDATE users
-                SET status = ?, is_active = ?, approved_by = ?, approved_by_name = ?,
-                    approved_at = NOW(), rejection_reason = ?
-                WHERE (? <> '' AND id = ?)
-                   OR (? <> '' AND student_roll_number IS NOT NULL AND LOWER(student_roll_number) = LOWER(?))
-                """;
-        try (PreparedStatement ps = conn.prepareStatement(usrSql)) {
-            ps.setString(1, newApproval);
-            ps.setBoolean(2, approve);
-            ps.setString(3, facultyId);
-            ps.setString(4, facultyName);
-            if (approve) {
-                ps.setNull(5, Types.VARCHAR);
-            } else {
-                ps.setString(5, reason);
-            }
-            ps.setString(6, cleanUserId);
-            ps.setString(7, cleanUserId);
-            ps.setString(8, cleanRoll);
-            ps.setString(9, cleanRoll);
-            ps.executeUpdate();
+        List<Bson> userMatch = new ArrayList<>();
+        if (userId != null && !userId.isBlank()) userMatch.add(idFilter(userId.trim()));
+        if (rollNumber != null && !rollNumber.isBlank()) {
+            userMatch.add(Filters.regex("studentRollNumber", "^" + java.util.regex.Pattern.quote(rollNumber.trim()) + "$", "i"));
         }
+        if (userMatch.isEmpty()) return;
+        db.getCollection(UserDao.COLLECTION).updateMany(Filters.or(userMatch), Updates.combine(
+                Updates.set("status", newApproval),
+                Updates.set("isActive", approve),
+                Updates.set("approvedBy", toKey(facultyId)),
+                Updates.set("approvedByName", facultyName),
+                Updates.set("approvedAt", now()),
+                Updates.set("rejectionReason", approve ? null : reason)));
     }
 
+    // --------------------------------------------------- faculty approvals
+
     public void updateFacultyApproval(
-            Connection conn,
+            MongoDatabase db,
             String facultyRowId,
             String userId,
             String email,
@@ -253,64 +177,43 @@ public class ApprovalDao {
             String reason,
             String adminId,
             String adminName
-    ) throws SQLException {
+    ) {
         String userStatus = approve ? "ACTIVE" : "REJECTED";
-        String cleanUserId = userId != null ? userId.trim() : "";
-        String cleanEmail = email != null ? email.trim() : "";
-        String cleanFacultyId = facultyRowId != null ? facultyRowId.trim() : "";
 
-        String usrSql = """
-                UPDATE users
-                SET status = ?, is_active = ?, approved_by = ?, approved_by_name = ?,
-                    approved_at = NOW(), rejection_reason = ?
-                WHERE (? <> '' AND id = ?)
-                   OR (? <> '' AND email IS NOT NULL AND LOWER(email) = LOWER(?))
-                """;
-        try (PreparedStatement ps = conn.prepareStatement(usrSql)) {
-            ps.setString(1, userStatus);
-            ps.setBoolean(2, approve);
-            ps.setString(3, adminId);
-            ps.setString(4, adminName);
-            if (approve) {
-                ps.setNull(5, Types.VARCHAR);
-            } else {
-                ps.setString(5, reason);
-            }
-            ps.setString(6, cleanUserId);
-            ps.setString(7, cleanUserId);
-            ps.setString(8, cleanEmail);
-            ps.setString(9, cleanEmail);
-            ps.executeUpdate();
+        List<Bson> userMatch = new ArrayList<>();
+        if (userId != null && !userId.isBlank()) userMatch.add(idFilter(userId.trim()));
+        if (email != null && !email.isBlank()) {
+            userMatch.add(Filters.regex("email", "^" + java.util.regex.Pattern.quote(email.trim()) + "$", "i"));
+        }
+        if (!userMatch.isEmpty()) {
+            db.getCollection(UserDao.COLLECTION).updateMany(Filters.or(userMatch), Updates.combine(
+                    Updates.set("status", userStatus),
+                    Updates.set("isActive", approve),
+                    Updates.set("approvedBy", toKey(adminId)),
+                    Updates.set("approvedByName", adminName),
+                    Updates.set("approvedAt", now()),
+                    Updates.set("rejectionReason", approve ? null : reason)));
         }
 
-        String facSql = """
-                UPDATE faculty
-                SET admin_approved = ?, status = ?, approved_by_name = ?, rejection_reason = ?
-                WHERE (? <> '' AND id = ?)
-                   OR (? <> '' AND user_id = ?)
-                   OR (? <> '' AND email IS NOT NULL AND LOWER(email) = LOWER(?))
-                """;
-        try (PreparedStatement ps = conn.prepareStatement(facSql)) {
-            ps.setBoolean(1, approve);
-            ps.setString(2, userStatus);
-            ps.setString(3, adminName);
-            if (approve) {
-                ps.setNull(4, Types.VARCHAR);
-            } else {
-                ps.setString(4, reason);
-            }
-            ps.setString(5, cleanFacultyId);
-            ps.setString(6, cleanFacultyId);
-            ps.setString(7, cleanUserId);
-            ps.setString(8, cleanUserId);
-            ps.setString(9, cleanEmail);
-            ps.setString(10, cleanEmail);
-            ps.executeUpdate();
+        List<Bson> facMatch = new ArrayList<>();
+        if (facultyRowId != null && !facultyRowId.isBlank()) facMatch.add(idFilter(facultyRowId.trim()));
+        if (userId != null && !userId.isBlank()) facMatch.add(refFilter("userId", userId.trim()));
+        if (email != null && !email.isBlank()) {
+            facMatch.add(Filters.regex("email", "^" + java.util.regex.Pattern.quote(email.trim()) + "$", "i"));
+        }
+        if (!facMatch.isEmpty()) {
+            db.getCollection(FacultyDao.COLLECTION).updateMany(Filters.or(facMatch), Updates.combine(
+                    Updates.set("adminApproved", approve),
+                    Updates.set("status", userStatus),
+                    Updates.set("approvedByName", adminName),
+                    Updates.set("rejectionReason", approve ? null : reason)));
         }
     }
 
+    // --------------------------------------------------- company approvals
+
     public void updateCompanyApprovalAndLinkedUsers(
-            Connection conn,
+            MongoDatabase db,
             String companyId,
             String companyName,
             String hrName,
@@ -319,28 +222,16 @@ public class ApprovalDao {
             String reason,
             String adminId,
             String adminName
-    ) throws SQLException {
+    ) throws com.mongodb.MongoException {
         String status = approve ? "APPROVED" : "REJECTED";
-        String compSql = """
-                UPDATE companies
-                SET status = ?, approval_status = ?, rejection_reason = ?,
-                    approved_by_admin_id = ?, approved_by_admin_name = ?, approved_by_name = ?, approved_at = NOW()
-                WHERE id = ?
-                """;
-        try (PreparedStatement ps = conn.prepareStatement(compSql)) {
-            ps.setString(1, approve ? "ACTIVE" : "REJECTED");
-            ps.setString(2, status);
-            if (approve) {
-                ps.setNull(3, Types.VARCHAR);
-            } else {
-                ps.setString(3, reason);
-            }
-            ps.setString(4, adminId);
-            ps.setString(5, adminName);
-            ps.setString(6, adminName);
-            ps.setString(7, companyId);
-            ps.executeUpdate();
-        }
+        db.getCollection(CompanyDao.COLLECTION).updateOne(idFilter(companyId), Updates.combine(
+                Updates.set("status", approve ? "ACTIVE" : "REJECTED"),
+                Updates.set("approvalStatus", status),
+                Updates.set("rejectionReason", approve ? null : reason),
+                Updates.set("approvedByAdminId", toKey(adminId)),
+                Updates.set("approvedByName", adminName),
+                Updates.set("approvedAt", now()),
+                Updates.set("updatedAt", now())));
 
         String safeName = companyName != null ? companyName.trim() : "partner";
         String slug = safeName.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]", "");
@@ -349,117 +240,109 @@ public class ApprovalDao {
         String baseRecruiterUsername = "recruiter_" + slug;
         String cleanEmail = hrEmail != null ? hrEmail.trim() : "";
 
-        // Inspect existing linked user before updating so valid self-registered hashes are never overwritten
-        String existingUserId = null;
-        String existingHash = null;
-        String findSql = """
-                SELECT id, password_hash FROM users
-                WHERE company_id = ?
-                   OR (? <> '' AND LOWER(email) = LOWER(?))
-                   OR LOWER(username) = LOWER(?)
-                LIMIT 1
-                """;
-        try (PreparedStatement ps = conn.prepareStatement(findSql)) {
-            ps.setString(1, companyId);
-            ps.setString(2, cleanEmail);
-            ps.setString(3, cleanEmail);
-            ps.setString(4, baseRecruiterUsername);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    existingUserId = rs.getString("id");
-                    existingHash = rs.getString("password_hash");
-                }
-            }
-        }
+        MongoCollection<Document> users = db.getCollection(UserDao.COLLECTION);
+        List<Bson> ors = new ArrayList<>();
+        ors.add(refFilter("companyId", companyId));
+        if (!cleanEmail.isEmpty()) ors.add(Filters.eq("email", cleanEmail));
+        ors.add(Filters.eq("username", baseRecruiterUsername));
+        Document existing = users.find(Filters.or(ors)).collation(CASE_INSENSITIVE).first();
 
-        if (existingUserId != null) {
+        if (existing != null) {
+            String existingHash = str(existing, "passwordHash");
             boolean hasExistingHash = existingHash != null && !existingHash.trim().isEmpty();
             if (!approve || hasExistingHash) {
-                String usrSql = """
-                        UPDATE users
-                        SET status = ?, is_active = ?, company_id = COALESCE(NULLIF(company_id, ''), ?),
-                            approved_by = ?, approved_by_name = ?, approved_at = NOW(), rejection_reason = ?
-                        WHERE id = ?
-                        """;
-                try (PreparedStatement ps = conn.prepareStatement(usrSql)) {
-                    ps.setString(1, approve ? "ACTIVE" : "REJECTED");
-                    ps.setBoolean(2, approve);
-                    ps.setString(3, companyId);
-                    ps.setString(4, adminId);
-                    ps.setString(5, adminName);
-                    if (approve) {
-                        ps.setNull(6, Types.VARCHAR);
-                    } else {
-                        ps.setString(6, reason);
-                    }
-                    ps.setString(7, existingUserId);
-                    ps.executeUpdate();
-                }
+                List<Bson> sets = new ArrayList<>();
+                sets.add(Updates.set("status", approve ? "ACTIVE" : "REJECTED"));
+                sets.add(Updates.set("isActive", approve));
+                if (existing.get("companyId") == null) sets.add(Updates.set("companyId", toKey(companyId)));
+                sets.add(Updates.set("approvedBy", toKey(adminId)));
+                sets.add(Updates.set("approvedByName", adminName));
+                sets.add(Updates.set("approvedAt", now()));
+                sets.add(Updates.set("rejectionReason", approve ? null : reason));
+                users.updateOne(Filters.eq("_id", existing.get("_id")), Updates.combine(sets));
             } else {
-                // Existing row had no password hash: assign configured initial recruiter password requiring change on first login
-                String initialPass = edu.gcet.placementhub.config.DatabaseConfig.getInstance().getEnvValue("GCET_BOOTSTRAP_RECRUITER_PASS");
-                if (initialPass == null || initialPass.isEmpty()) {
-                    throw new SQLException("GCET_BOOTSTRAP_RECRUITER_PASS is not configured in environment or .env.");
-                }
-                String[] hashed = PasswordHasher.hashWithBCrypt(initialPass);
-                String usrSql = """
-                        UPDATE users
-                        SET password_hash = ?, salt = ?, must_change_password = TRUE,
-                            status = 'APPROVED', is_active = TRUE, company_id = COALESCE(NULLIF(company_id, ''), ?),
-                            approved_by = ?, approved_by_name = ?, approved_at = NOW(), rejection_reason = NULL
-                        WHERE id = ?
-                        """;
-                try (PreparedStatement ps = conn.prepareStatement(usrSql)) {
-                    ps.setString(1, hashed[0]);
-                    ps.setString(2, hashed[1]);
-                    ps.setString(3, companyId);
-                    ps.setString(4, adminId);
-                    ps.setString(5, adminName);
-                    ps.setString(6, existingUserId);
-                    ps.executeUpdate();
-                }
+                String[] hashed = PasswordHasher.hashWithBCrypt(
+                        DatabaseConfig.getInstance().getBootstrapPassword("GCET_BOOTSTRAP_RECRUITER_PASS"));
+                users.updateOne(Filters.eq("_id", existing.get("_id")), Updates.combine(
+                        Updates.set("passwordHash", hashed[0]),
+                        Updates.set("salt", hashed[1]),
+                        Updates.set("mustChangePassword", true),
+                        Updates.set("status", "APPROVED"),
+                        Updates.set("isActive", true),
+                        Updates.set("companyId", existing.get("companyId") != null ? existing.get("companyId") : toKey(companyId)),
+                        Updates.set("approvedBy", toKey(adminId)),
+                        Updates.set("approvedByName", adminName),
+                        Updates.set("approvedAt", now()),
+                        Updates.set("rejectionReason", null)));
             }
         } else if (approve) {
-            // Ensure unique recruiter username if another account uses the base prefix
             String recruiterUsername = baseRecruiterUsername;
-            try (PreparedStatement ps = conn.prepareStatement("SELECT id FROM users WHERE LOWER(username) = LOWER(?) LIMIT 1")) {
-                ps.setString(1, recruiterUsername);
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (rs.next()) {
-                        String suffix = companyId != null ? companyId.replaceAll("[^a-zA-Z0-9]", "") : UUID.randomUUID().toString();
-                        if (suffix.length() > 4) suffix = suffix.substring(suffix.length() - 4);
-                        recruiterUsername = baseRecruiterUsername + "_" + suffix;
-                    }
-                }
+            if (users.find(Filters.eq("username", recruiterUsername)).collation(CASE_INSENSITIVE).first() != null) {
+                String suffix = companyId != null ? companyId.replaceAll("[^a-zA-Z0-9]", "") : UUID.randomUUID().toString();
+                if (suffix.length() > 4) suffix = suffix.substring(suffix.length() - 4);
+                recruiterUsername = baseRecruiterUsername + "_" + suffix;
             }
-
-            // Create initial recruiter user account with configured temporary BCrypt password requiring first-login change
-            String initialPass = edu.gcet.placementhub.config.DatabaseConfig.getInstance().getEnvValue("GCET_BOOTSTRAP_RECRUITER_PASS");
-            if (initialPass == null || initialPass.isEmpty()) {
-                throw new SQLException("GCET_BOOTSTRAP_RECRUITER_PASS is not configured in environment or .env.");
-            }
-            String[] hashed = PasswordHasher.hashWithBCrypt(initialPass);
+            String[] hashed = PasswordHasher.hashWithBCrypt(
+                    DatabaseConfig.getInstance().getBootstrapPassword("GCET_BOOTSTRAP_RECRUITER_PASS"));
             String effectiveEmail = !cleanEmail.isEmpty() ? cleanEmail : (recruiterUsername + "@company.com");
             String effectiveHrName = (hrName != null && !hrName.isBlank()) ? hrName.trim() : "HR Lead";
-            String insertRecruiterSql = """
-                    INSERT INTO users (
-                      id, username, email, full_name, role, department, company_id,
-                      password_hash, salt, must_change_password, status, is_active, approved_by, approved_by_name, approved_at, created_at
-                    ) VALUES (?, ?, ?, ?, 'COMPANY', ?, ?, ?, ?, TRUE, 'APPROVED', TRUE, ?, ?, NOW(), NOW())
-                    """;
-            try (PreparedStatement ps = conn.prepareStatement(insertRecruiterSql)) {
-                ps.setString(1, "usr-comp-" + UUID.randomUUID());
-                ps.setString(2, recruiterUsername);
-                ps.setString(3, effectiveEmail);
-                ps.setString(4, effectiveHrName + " (" + safeName + ")");
-                ps.setString(5, safeName);
-                ps.setString(6, companyId);
-                ps.setString(7, hashed[0]);
-                ps.setString(8, hashed[1]);
-                ps.setString(9, adminId);
-                ps.setString(10, adminName);
-                ps.executeUpdate();
-            }
+            users.insertOne(new Document("username", recruiterUsername)
+                    .append("email", effectiveEmail)
+                    .append("fullName", effectiveHrName + " (" + safeName + ")")
+                    .append("role", "COMPANY")
+                    .append("department", safeName)
+                    .append("designation", "Recruiter")
+                    .append("phone", "")
+                    .append("companyId", toKey(companyId))
+                    .append("companyName", safeName)
+                    .append("passwordHash", hashed[0])
+                    .append("salt", hashed[1])
+                    .append("mustChangePassword", true)
+                    .append("status", "APPROVED")
+                    .append("isActive", true)
+                    .append("authorizedDepartments", new ArrayList<>())
+                    .append("approvedBy", toKey(adminId))
+                    .append("approvedByName", adminName)
+                    .append("approvedAt", now())
+                    .append("createdAt", now()));
         }
+    }
+
+    // ------------------------------------------------------------------ mapping
+
+    public static AdminRequest mapAdminRequest(Document d) {
+        AdminRequest r = new AdminRequest();
+        r.setId(id(d));
+        r.setUserId(ref(d, "userId"));
+        r.setApplicantName(str(d, "applicantName"));
+        r.setApplicantEmail(str(d, "applicantEmail"));
+        r.setCurrentRole(str(d, "currentRole"));
+        r.setRequestedRole(str(d, "requestedRole"));
+        r.setDepartment(str(d, "department"));
+        r.setReason(str(d, "reason"));
+        r.setStatus(str(d, "status"));
+        r.setDecidedBy(ref(d, "decidedBy"));
+        r.setDecidedByName(str(d, "decidedByName"));
+        r.setDecisionNotes(str(d, "decisionNotes"));
+        r.setCreatedAt(iso(d, "createdAt"));
+        r.setDecidedAt(iso(d, "decidedAt"));
+        return r;
+    }
+
+    public static ApprovalRecord mapApprovalRecord(Document d) {
+        ApprovalRecord r = new ApprovalRecord();
+        r.setId(id(d));
+        r.setRequestType(str(d, "requestType"));
+        r.setTargetId(ref(d, "targetId"));
+        r.setTargetName(str(d, "targetName"));
+        r.setStudentRollNumber(str(d, "studentRollNumber"));
+        r.setDepartment(str(d, "department"));
+        r.setApproverId(ref(d, "approverId"));
+        r.setApproverName(str(d, "approverName"));
+        r.setApproverRole(str(d, "approverRole"));
+        r.setDecision(str(d, "decision"));
+        r.setComments(str(d, "comments"));
+        r.setDecidedAt(iso(d, "decidedAt"));
+        return r;
     }
 }

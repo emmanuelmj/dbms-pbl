@@ -7,9 +7,14 @@ public class DriveRequiredSkill {
     private String skillId;
     private int minProficiency;
     private boolean mandatory;
+    /** Denormalized skill name stored inside the embedded `placement_drives.requiredSkills[]` array. */
+    private String skillName;
 
     public DriveRequiredSkill() {
     }
+
+    public String getSkillName() { return skillName; }
+    public void setSkillName(String skillName) { this.skillName = skillName; }
 
     public DriveRequiredSkill(String skillId, int minProficiency, boolean mandatory) {
         this.skillId = skillId;

@@ -258,7 +258,7 @@ public class LoginPanel extends JPanel {
         left.add(txt);
 
         dbStatusBtn = new ActionButton(
-                "●  MySQL 8: Checking...",
+                "●  MongoDB: Checking...",
                 ThemeManager.SLATE_800,
                 ThemeManager.SLATE_700,
                 ThemeManager.SLATE_200,
@@ -266,7 +266,7 @@ public class LoginPanel extends JPanel {
                 10
         );
         dbStatusBtn.setFont(ThemeManager.monoFont(Font.BOLD, 11f));
-        dbStatusBtn.setToolTipText("Inspect & configure local MySQL 8 JDBC connection (gcet_placement_hub)");
+        dbStatusBtn.setToolTipText("Inspect & configure MongoDB connection (Atlas / Local)");
         dbStatusBtn.addActionListener(e -> {
             if (onOpenDbSettings != null) {
                 onOpenDbSettings.run();
@@ -299,10 +299,11 @@ public class LoginPanel extends JPanel {
     public void updateDbStatus(DbStatus status) {
         if (dbStatusBtn == null) return;
         if (status != null && status.isConnected()) {
-            dbStatusBtn.setText("●  MySQL: Connected (" + status.getDatabase() + ")");
+            String label = status.isUsingLocalFallback() ? "●  MongoDB: Local" : (status.isAtlas() ? "●  MongoDB: Atlas" : "●  MongoDB: Connected");
+            dbStatusBtn.setText(label + " (" + status.getDatabase() + ")");
             dbStatusBtn.updateColors(ThemeManager.SLATE_800, ThemeManager.SLATE_700, new Color(0x34, 0xD3, 0x99), ThemeManager.SLATE_700);
         } else {
-            dbStatusBtn.setText("●  MySQL: Configure Connection");
+            dbStatusBtn.setText("●  MongoDB: Offline / Configure");
             dbStatusBtn.updateColors(new Color(0x4C, 0x1D, 0x24), new Color(0x6B, 0x21, 0x2E), new Color(0xFB, 0x71, 0x85), new Color(0x9F, 0x12, 0x39));
         }
     }
@@ -716,7 +717,7 @@ public class LoginPanel extends JPanel {
 
     private void showPasswordRecoveryDialog(PortalCategory category) {
         Window owner = SwingUtilities.getWindowAncestor(this);
-        JDialog dlg = new JDialog(owner, "Recover / Set Account Password — MySQL Verified", Dialog.ModalityType.APPLICATION_MODAL);
+        JDialog dlg = new JDialog(owner, "Recover / Set Account Password — Verified", Dialog.ModalityType.APPLICATION_MODAL);
         dlg.setSize(520, 500);
         dlg.setLocationRelativeTo(owner);
         dlg.setLayout(new BorderLayout());
@@ -726,12 +727,12 @@ public class LoginPanel extends JPanel {
         content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
         content.setBorder(new EmptyBorder(20, 24, 16, 24));
 
-        JLabel title = new JLabel("MySQL-Verified Account Password Update");
+        JLabel title = new JLabel("Verified Account Password Update");
         title.setFont(ThemeManager.font(Font.BOLD, 16));
         title.setForeground(ThemeManager.NAVY_MIDNIGHT);
         title.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        JLabel subtitle = new JLabel("<html><body style='width:450px;'>Safely set a new BCrypt password for an existing account you own in <code>gcet_placement_hub</code>. Requires BOTH your registered email match and your local MySQL Server password. Approval flags are never altered.</body></html>");
+        JLabel subtitle = new JLabel("<html><body style='width:450px;'>Safely set a new BCrypt password for an existing account you own in MongoDB <code>gcet_placement_hub</code>. Requires your registered email match. Approval flags are never altered.</body></html>");
         subtitle.setFont(ThemeManager.font(Font.PLAIN, 11.5f));
         subtitle.setForeground(ThemeManager.SLATE_600);
         subtitle.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -759,7 +760,7 @@ public class LoginPanel extends JPanel {
         content.add(Box.createVerticalStrut(8));
         content.add(labeledField("Registered Account Email *", emailField));
         content.add(Box.createVerticalStrut(8));
-        content.add(labeledField("Local MySQL Database Password (Owner Verification) *", dbPassField));
+        content.add(labeledField("Database Verification Key / Password (Optional)", dbPassField));
         content.add(Box.createVerticalStrut(8));
         content.add(labeledField("New Account Password *", newPassField));
         content.add(Box.createVerticalStrut(8));
@@ -1104,7 +1105,7 @@ public class LoginPanel extends JPanel {
                     stuRegSubmitBtn.setText("Submit Student Registration for Faculty Approval");
                     lastRegisteredRoll = receipt.getLoginHint();
                     stuReceiptBodyLabel.setText("<html><center>Account for <b>" + receipt.getDisplayName()
-                            + "</b> (" + receipt.getLoginHint() + ") has been stored in MySQL with status <b>PENDING_APPROVAL</b>.</center></html>");
+                            + "</b> (" + receipt.getLoginHint() + ") has been stored in MongoDB with status <b>PENDING_APPROVAL</b>.</center></html>");
                     layout.show(container, "RECEIPT");
                 },
                 err -> {
@@ -1348,7 +1349,7 @@ public class LoginPanel extends JPanel {
                         compRegSubmitBtn.setText("Submit Company Registration for Admin Approval");
                         lastRegisteredCompanyEmail = receipt.getLoginHint();
                         compReceiptBodyLabel.setText("<html><center>Profile for <b>" + receipt.getDisplayName()
-                                + "</b> (" + receipt.getLoginHint() + ") is stored in MySQL with status <b>PENDING_APPROVAL</b>.</center></html>");
+                                + "</b> (" + receipt.getLoginHint() + ") is stored in MongoDB with status <b>PENDING_APPROVAL</b>.</center></html>");
                         regLayout.show(regContainer, "RECEIPT");
                     },
                     err -> {
@@ -1528,7 +1529,9 @@ public class LoginPanel extends JPanel {
             add(user);
         }
 
-        void setSelected(boolean selected) {
+        @Override
+        public void setSelected(boolean selected) {
+            super.setSelected(selected);
             this.selected = selected;
             repaint();
         }

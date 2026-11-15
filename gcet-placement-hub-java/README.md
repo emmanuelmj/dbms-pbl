@@ -1,124 +1,135 @@
-# GCET PLACEMENT HUB — Java 17 Swing Desktop Edition
+# GCET PLACEMENT HUB — Java 17 Desktop (MongoDB Edition)
 
-Complete desktop edition of the **Geethanjali College of Engineering and Technology (UGC Autonomous)** *Smart Placement Cell & Skill Matrix Portal*, engineered in **Java 17**, **Java Swing**, **FlatLaf 3.5.4**, **JFreeChart 1.5.5**, **OpenPDF 1.3.43**, and **MySQL Connector/J 8.4.0** via direct **JDBC** connectivity to your local `gcet_placement_hub` MySQL 8 database.
+**Geethanjali College of Engineering and Technology (UGC Autonomous, Accredited by NAAC A+ & NBA)**  
+*Smart Placement Cell, Automated Eligibility Engine & Skill Matrix Portal*
 
-> **Important:** This Maven project (`gcet-placement-hub-java/`) is completely independent and does not alter the original React/TypeScript/Node.js/Express codebase. Never `DROP`, `TRUNCATE`, or reset `gcet_placement_hub`—all DAOs perform non-destructive reads/writes directly against the existing 17 MySQL tables.
+A cross-platform Java 17 desktop system built with **Java Swing**, **FlatLaf 3.5.4**, **JFreeChart 1.5.5**, **OpenPDF**, and the official **MongoDB Java Driver 5.x**. Designed to run seamlessly on both **macOS (Retina/HiDPI)** and **Windows (10/11)** against a shared **MongoDB Atlas** cloud cluster (or local MongoDB Community fallback).
 
 ---
 
-## 1. Prerequisites on Windows
+## ⚡ 3-Step Quickstart (Mac & Windows)
 
-Install and verify the following on your Windows laptop:
+### 🍏 On macOS (Teammate Setup)
 
-1. **Java JDK 17+** (Eclipse Temurin / Oracle / Microsoft OpenJDK 17+)
-2. **Apache Maven 3.8+**
-3. **MySQL Server 8.x** running locally on `127.0.0.1:3306` with schema `gcet_placement_hub` populated
+```bash
+# 1. Clone repository & enter the Java project directory
+git clone https://github.com/your-username/gcet-placement-hub.git
+cd gcet-placement-hub/gcet-placement-hub-java
 
-Run these PowerShell commands to verify prerequisites:
+# 2. Configure MongoDB Atlas URI (or keep default local MongoDB)
+cp .env.example .env
+# Edit .env in nano/TextEdit to paste your MongoDB Atlas URI:
+# MONGO_URI="mongodb+srv://<username>:<password>@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority"
+# MONGO_DB_NAME="gcet_placement_hub"
 
-```powershell
-java -version
-mvn -version
-Get-Service -Name "*MySQL*"
+# 3. Launch via the automated macOS script (checks Java 17+, sets Retina flags, runs mvnw)
+chmod +x run-mac.sh
+./run-mac.sh
 ```
 
+*(You can also run `./run-mac.sh` directly from the repository root).*
+
 ---
 
-## 2. Configure Database Credentials Securely
-
-No database passwords or application user passwords are hardcoded in Java source code. Keep MySQL bound to `127.0.0.1` (do **not** expose port `3306` publicly).
-
-In PowerShell inside `gcet-placement-hub-java\`:
+### 🪟 On Windows (Command Prompt / PowerShell)
 
 ```powershell
-Copy-Item .env.example .env
+# 1. Clone repository & navigate to gcet-placement-hub-java
+cd gcet-placement-hub-java
+
+# 2. Configure .env
+copy .env.example .env
 notepad .env
+
+# 3. Run the automated Windows launcher (or double-click run-windows.bat)
+.\run-windows.bat
+# Or via PowerShell:
+.\run-windows.ps1
 ```
-
-Set your local MySQL credentials inside `.env` (or use `config.properties` copied from `config.properties.example`, or system environment variables):
-
-```env
-DB_HOST=127.0.0.1
-DB_PORT=3306
-DB_NAME=gcet_placement_hub
-DB_USER=root
-DB_PASSWORD=your_actual_local_mysql_password
-```
-
-Alternatively, you can configure or test runtime JDBC settings directly inside the application via the **MySQL Connection Settings** modal on the Login / Header bar (and optionally click **Save Settings to .env**).
 
 ---
 
-## 3. Build, Run & Package Commands (Windows PowerShell)
+## 🔑 Default GCET Hyderabad Demo Credentials
 
-From inside `gcet-placement-hub-java\`:
+On first launch, if the database is empty, the application automatically initializes `$jsonSchema` validation rules, creates high-performance indexes, and seeds realistic GCET Hyderabad student, faculty, and company records.
 
-```powershell
-# 1. Clean & compile Java 17 sources + copy resources
-mvn clean compile
+All demo accounts use the password from `GCET_DEMO_PASSWORD` in `.env` (**`Password@123`** when you copied `.env.example`; built-in fallback `Gcet@2025` if no `.env` exists).
 
-# 2. Launch directly via Maven
-mvn exec:java
+| Sign-in tab | Username | Role | Person |
+| :--- | :--- | :--- | :--- |
+| **ADMIN** | `principal.sagar` | PRINCIPAL | Dr. S. Udaya Kumar |
+| **ADMIN** | `chairman.gcet` | CHAIRMAN | Sri G. R. Ravinder Reddy |
+| **ADMIN** | `vicechairman.gcet` | VICE_CHAIRMAN | Sri G. Harishchandra Reddy |
+| **ADMIN** | `placement.admin` | ADMIN | Placement Administration Office |
+| **ADMIN / FACULTY** | `tpo.gcet` | PLACEMENT_OFFICER | Dr. K. Srinivas (TPO) |
+| **FACULTY** | `faculty_lavanya` | FACULTY (CSE, AIML, DS) | B. Laxmi Lavanya |
+| **FACULTY** | `faculty_aparna` | FACULTY (IT, Cyber Security) | P. Aparna |
+| **FACULTY** | `faculty_rajashakar` | FACULTY (ECE, EEE, MECH, CIVIL) | S. Raja Shakar Reddy |
+| **STUDENTS** | `22R11A0501` | STUDENT (CSE, placed at Amazon) | Akhil Reddy Gaddam |
+| **STUDENTS** | `22R11A6702` | STUDENT (CSE-DS, can apply to Deloitte live) | Sahithi Rao Vuppala |
+| **RECRUITERS** | `recruiter_amazon`, `recruiter_infosys`, `recruiter_tataconsultancy`, … | COMPANY | one `recruiter_<company>` account per seeded company |
 
-# 3. Package standalone executable shaded fat JAR (excludes signed META-INF/*.SF|DSA|RSA digests)
-mvn clean package
+The complete list of accounts and demo scenarios (pending approvals, live applications, skill-gap examples) is in [SETUP_AND_RUN.md](../SETUP_AND_RUN.md).
 
-# 4. Run the standalone executable fat JAR
-java -jar target\gcet-placement-hub-java.jar
+---
+
+## 🏗️ Cross-Platform Architecture & Tooling
+
+1. **Self-Contained Maven Wrapper (`./mvnw` / `mvnw.cmd`):**
+   - Teammates do not need to install Apache Maven on their system.
+   - macOS: `./mvnw clean compile exec:java`
+   - Windows: `.\mvnw.cmd clean compile exec:java`
+2. **Cloud-First with Resilient Local Fallback:**
+   - Detects `MONGO_URI` from `.env`, `config.properties`, or system environment variables.
+   - If unset or unreachable, seamlessly falls back to `mongodb://localhost:27017` with informative diagnostics.
+3. **Retina & HiDPI Aware:**
+   - Automatically injects `-Dapple.laf.useScreenMenuBar=true` and `-Dapple.awt.application.appearance=system` on macOS.
+   - Built on FlatLaf modern UI tokens for native dark/light theme switching.
+4. **POSIX-Safe File Handling:**
+   - Zero hardcoded Windows backslashes (`\`); all path resolutions strictly use `Paths.get(...)` and `File.separator`.
+
+---
+
+## 🔬 Live Schema & Aggregation Inspector (DBMS Evaluation)
+
+The desktop application includes a dedicated **Live Schema & Aggregation Inspector** (`Settings` -> `Database Diagnostics` or top-right `● MongoDB: Atlas` status pill):
+
+- **Tab 1: Collections & Indexes:** Live document counts, storage sizes, and full BSON index metadata (unique, compound, multikey, text).
+- **Tab 2: Live BSON Samples:** Real-time query inspector comparing embedded documents (`students`, `placement_drives`, `applications`) against referenced collections.
+- **Tab 3: Aggregation & EXPLAIN:** Live execution of five real pipelines — branch analytics (`$group`), drive eligibility (`$match`/`$project`), skill-gap (`$setIntersection`/`$setDifference`/`$lookup`), CTC distribution (`$bucket`) and the application funnel (`$facet`/`$unwind`) — each with `.explain("executionStats")` index metrics. The JSON shown is rendered from the exact pipeline the Java code sends.
+- **Tab 4: $jsonSchema Rules:** Live inspection of server-enforced JSON validation contracts ensuring zero data anomalies.
+
+Headless check of the same features (60 assertions, exit code 0 on success):
+
+```bash
+./mvnw -q test-compile exec:java -Dexec.classpathScope=test -Dexec.mainClass=edu.gcet.placementhub.SmokeTest
 ```
 
-You can also use the included helper scripts:
-
-- **PowerShell:** `.\run-windows.ps1` (auto-checks Java 17+, Maven, `.env`, compiles, and runs)
-- **Command Prompt / Double-click:** `run-windows.bat`
+For the comprehensive theoretical and architectural evaluation submitted for our DBMS review, see [MONGODB_ARCHITECTURE.md](../MONGODB_ARCHITECTURE.md); for a from-scratch machine setup see [SETUP_AND_RUN.md](../SETUP_AND_RUN.md).
 
 ---
 
-## 4. Verify All 17 Existing MySQL Tables (Read-Only)
+## 🛠️ Build & Package Commands
 
-Run in MySQL CLI or MySQL Workbench, or inspect live inside the app under **DB Diagnostics**:
+```bash
+# Clean & compile all Java 17 sources
+./mvnw clean compile
 
-```sql
-USE gcet_placement_hub;
-SHOW TABLES;
+# Launch GUI application
+./mvnw exec:java
+
+# Build standalone shaded executable fat JAR
+./mvnw clean package
+
+# Run shaded JAR directly
+java -jar target/gcet-placement-hub-java.jar
 ```
 
-Expected 17 tables:
-1. `users`
-2. `students`
-3. `faculty`
-4. `skills`
-5. `student_skills`
-6. `companies`
-7. `placement_drives`
-8. `applications`
-9. `approval_records`
-10. `audit_logs`
-11. `student_projects`
-12. `student_certifications`
-13. `student_internships`
-14. `drive_eligible_branches`
-15. `drive_required_skills`
-16. `application_stage_history`
-17. `admin_requests`
-
 ---
 
-## 5. Authentication & Safe Password Recovery
+## ⚠️ MongoDB Atlas Checklist for Teams
 
-- **Students:** Sign in with your registered **Roll Number** (e.g., `22R11A0501`) under **STUDENTS** (`PENDING_APPROVAL` / `REJECTED` accounts are blocked until approved by Department Faculty Coordinator).
-- **Faculty / TPO:** Sign in with Faculty ID, username, or email under **FACULTY**.
-- **Recruiters / Companies:** Sign in with corporate email or username under **RECRUITERS**.
-- **Administrators & Leadership:** Sign in under **ADMIN** (`PRINCIPAL`, `CHAIRMAN`, `VICE_CHAIRMAN`, `ADMIN`).
-- **Supported Hashes:** `PasswordHasher` verifies BCrypt (`$2a$` / `$2b$` / `$2y$`), legacy Node `scrypt$` (`N=16384, r=8, p=1, dkLen=64`), `PBKDF2WithHmacSHA256`, and salted SHA-256 hex without modifying existing password hashes automatically.
-- **Safe Recovery:** If you forgot a password for an existing account in `gcet_placement_hub.users`, click **Forgot / Set Password for an Account I Own** on the Sign In screen. It requires BOTH matching `users.email` AND valid local MySQL Server authentication before hashing a new BCrypt (`$2b$`, cost 12) password, while preserving all approval and activation gates.
-
----
-
-## 6. Complete Module Inventory
-
-- **Welcome & Auth Portal:** Public GCET Welcome portal, 4-role Login tabs, self-service Student/Faculty/Company registrations with approval receipts, MySQL-verified password recovery.
-- **Executive & Role Dashboards:** Role-tailored analytics cards, JFreeChart placement charts, active drives overview, live MySQL KPIs.
-- **Campus Connect & Student Directory:** GCTC news/connect portal, Student Directory with departmental search/filtering, Individual Student Profiles (Skills, Projects, Certifications, Internships), Skill Matrix proficiency verification, and Faculty Directory.
-- **Placement Management:** Company Directory & Profiles, Placement Drive CRUD with eligible branches & required skills, Eligibility Checker with itemized breakdown, Skill Gap Analysis with training plans, Company-Student Matching, and 10-stage Application Pipeline (`application_stage_history`).
-- **Governance, Reports & Settings:** RBAC-enforced Approval Center (Department-scoped Faculty approval for students; Admin approval for Faculty/Companies; Principal-only approval for Admin privilege requests), Reports Center with CSV & GCET-branded OpenPDF exports, Read-only 17-table DB Diagnostics, Scoped Audit Logs, and Light/Dark FlatLaf Settings.
+If connecting both macOS and Windows teammates to a shared MongoDB Atlas cluster:
+1. **IP Access List:** Ensure your Atlas Network Access has `0.0.0.0/0` (Allow Access from Anywhere) enabled for presentation testing.
+2. **Database User:** Verify the database user has `readWriteAnyDatabase` or `dbAdmin` privileges on `gcet_placement_hub`.
+3. **SRV Connection String:** Ensure standard URI format: `mongodb+srv://<user>:<password>@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority`.

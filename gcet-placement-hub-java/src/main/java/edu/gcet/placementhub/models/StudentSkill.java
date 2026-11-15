@@ -10,6 +10,11 @@ public class StudentSkill {
     private boolean verifiedByFaculty;
     private String verifiedByFacultyId;
     private String verifiedAt;
+    /** Denormalized skill name stored inside the embedded `students.skills[]` sub-document. */
+    private String skillName;
+
+    public String getSkillName() { return skillName; }
+    public void setSkillName(String skillName) { this.skillName = skillName; }
 
     public String getStudentId() { return studentId; }
     public void setStudentId(String studentId) { this.studentId = studentId; }

@@ -94,7 +94,7 @@ public class HeaderBarPanel extends JPanel {
         dateChip.setBorder(new EmptyBorder(6, 10, 6, 10));
 
         dbStatusBtn = new ActionButton(
-                "●  MySQL 8: Checking...",
+                "●  MongoDB: Checking...",
                 new Color(23, 43, 80, 170),
                 ThemeManager.NAVY_DEEP,
                 ThemeManager.SLATE_200,
@@ -182,10 +182,11 @@ public class HeaderBarPanel extends JPanel {
     public void updateDbStatus(DbStatus status) {
         this.lastDbStatus = status;
         if (status != null && status.isConnected()) {
-            dbStatusBtn.setText("●  MySQL 8: Connected");
+            String label = status.isUsingLocalFallback() ? "●  MongoDB: Local" : (status.isAtlas() ? "●  MongoDB: Atlas" : "●  MongoDB: Connected");
+            dbStatusBtn.setText(label);
             dbStatusBtn.setForeground(new Color(0x34, 0xD3, 0x99));
         } else {
-            dbStatusBtn.setText("●  MySQL 8: Disconnected");
+            dbStatusBtn.setText("●  MongoDB: Offline");
             dbStatusBtn.setForeground(new Color(0xFB, 0x71, 0x85));
         }
     }

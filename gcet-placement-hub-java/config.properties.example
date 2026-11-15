@@ -1,6 +1,8 @@
-# Optional Java properties fallback (copy to config.properties if preferred over .env)
-db.host=127.0.0.1
-db.port=3306
-db.name=gcet_placement_hub
-db.user=root
-db.password=your_mysql_password
+# ==============================================================================
+# GCET Placement Hub - Java Properties Fallback
+# Copy this file to `config.properties` if preferred over `.env`
+# ==============================================================================
+
+mongo.uri=mongodb://localhost:27017
+mongo.db.name=gcet_placement_hub
+mongo.local.fallback=true

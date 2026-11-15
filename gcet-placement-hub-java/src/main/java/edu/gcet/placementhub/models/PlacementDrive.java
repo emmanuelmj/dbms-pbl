@@ -11,9 +11,14 @@ public class PlacementDrive {
     private String id;
     private String companyId;
     private String companyName;
+    /** Denormalized copy of companies.tier so the drives list renders without a second query. */
+    private String companyTier;
     private String jobRole;
     private String jobDescription;
     private double salaryPackageLpa;
+
+    public String getCompanyTier() { return companyTier; }
+    public void setCompanyTier(String companyTier) { this.companyTier = companyTier; }
     private List<String> eligibleBranches = new ArrayList<>();
     private double minCgpa;
     private int maxBacklogsAllowed;
@@ -80,4 +85,13 @@ public class PlacementDrive {
 
     public String getCreatedAt() { return createdAt; }
     public void setCreatedAt(String createdAt) { this.createdAt = createdAt; }
+
+    public int getMaxBacklogs() { return maxBacklogsAllowed; }
+    public void setMaxBacklogs(int maxBacklogs) { this.maxBacklogsAllowed = maxBacklogs; }
+
+    public int getTargetGradYear() { return targetGraduationYear; }
+    public void setTargetGradYear(int targetGradYear) { this.targetGraduationYear = targetGradYear; }
+
+    public int getPositions() { return availablePositions; }
+    public void setPositions(int positions) { this.availablePositions = positions; }
 }

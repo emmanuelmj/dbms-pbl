@@ -1,24 +1,32 @@
 package edu.gcet.placementhub.services;
 
+import com.mongodb.MongoException;
+import com.mongodb.client.MongoDatabase;
 import edu.gcet.placementhub.dao.AuditLogDao;
 import edu.gcet.placementhub.dao.CompanyDao;
+import edu.gcet.placementhub.dao.FacultyDao;
 import edu.gcet.placementhub.dao.StudentDao;
 import edu.gcet.placementhub.dao.UserDao;
 import edu.gcet.placementhub.database.DatabaseConnection;
+import edu.gcet.placementhub.database.DatabaseException;
 import edu.gcet.placementhub.models.Company;
+import edu.gcet.placementhub.models.Faculty;
 import edu.gcet.placementhub.models.PortalCategory;
 import edu.gcet.placementhub.models.Student;
+import edu.gcet.placementhub.models.StudentSkill;
 import edu.gcet.placementhub.models.User;
 import edu.gcet.placementhub.models.UserRole;
 import edu.gcet.placementhub.utils.DeptNormalizer;
 import edu.gcet.placementhub.utils.PasswordHasher;
 
-import java.sql.*;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.UUID;
 
 /**
- * Complete Java port of server/routes.ts authentication & registration workflows.
- * Strictly authenticates against MySQL `gcet_placement_hub` with BCrypt + legacy hash support.
+ * Complete authentication & registration workflows backed by MongoDB Atlas / Community.
+ * Strictly authenticates against MongoDB `users` and `students` with BCrypt + legacy hash verification.
  */
 public class AuthService {
 
@@ -26,6 +34,7 @@ public class AuthService {
 
     private final UserDao userDao = new UserDao();
     private final StudentDao studentDao = new StudentDao();
+    private final FacultyDao facultyDao = new FacultyDao();
     private final CompanyDao companyDao = new CompanyDao();
     private final AuditLogDao auditLogDao = new AuditLogDao();
 
@@ -44,8 +53,13 @@ public class AuthService {
             this.studentRecord = studentRecord;
         }
 
-        public User getUser() { return user; }
-        public Student getStudentRecord() { return studentRecord; }
+        public User getUser() {
+            return user;
+        }
+
+        public Student getStudentRecord() {
+            return studentRecord;
+        }
     }
 
     public static class RegistrationReceipt {
@@ -61,14 +75,25 @@ public class AuthService {
             this.message = message;
         }
 
-        public String getPrimaryId() { return primaryId; }
-        public String getDisplayName() { return displayName; }
-        public String getLoginHint() { return loginHint; }
-        public String getMessage() { return message; }
+        public String getPrimaryId() {
+            return primaryId;
+        }
+
+        public String getDisplayName() {
+            return displayName;
+        }
+
+        public String getLoginHint() {
+            return loginHint;
+        }
+
+        public String getMessage() {
+            return message;
+        }
     }
 
     /**
-     * Authenticates a user directly against MySQL `users` (and `students` if applicable).
+     * Authenticates a user directly against MongoDB `users` (and `students` if applicable).
      */
     public AuthResult login(String username, String plainPassword, PortalCategory portalRole) throws AuthException {
         boolean isStudentPortal = portalRole == PortalCategory.STUDENTS;
@@ -83,8 +108,9 @@ public class AuthService {
             throw new AuthException("Please enter your password.");
         }
 
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            User user = userDao.findByLoginIdentifier(conn, cleanUsername);
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            User user = userDao.findByLoginIdentifier(db, cleanUsername);
             if (user == null) {
                 throw new AuthException(INVALID_CREDENTIALS_MSG);
             }
@@ -124,21 +150,21 @@ public class AuthService {
                 }
             }
 
-            Student studentRecord = studentDao.findByRollNumber(conn, cleanUsername);
+            Student studentRecord = studentDao.findByRollNumber(db, cleanUsername);
             if (studentRecord == null && user.getRole() == UserRole.STUDENT) {
-                studentRecord = studentDao.findByUserId(conn, user.getId());
+                studentRecord = studentDao.findByUserId(db, user.getId());
                 if (studentRecord == null && user.getStudentRollNumber() != null) {
-                    studentRecord = studentDao.findByRollNumber(conn, user.getStudentRollNumber());
+                    studentRecord = studentDao.findByRollNumber(db, user.getStudentRollNumber());
                 }
                 if (studentRecord == null && user.getUsername() != null) {
-                    studentRecord = studentDao.findByRollNumber(conn, user.getUsername());
+                    studentRecord = studentDao.findByRollNumber(db, user.getUsername());
                 }
                 if (studentRecord == null && user.getEmail() != null) {
-                    studentRecord = studentDao.findByEmail(conn, user.getEmail());
+                    studentRecord = studentDao.findByEmail(db, user.getEmail());
                 }
             }
 
-            // Approval & status gates (exact match to server/routes.ts lines 701-772)
+            // Approval & status gates
             String userStatus = user.getStatus() == null ? "" : user.getStatus().trim().toUpperCase(Locale.ROOT);
             if (user.getRole() == UserRole.STUDENT) {
                 String stuApproval = (studentRecord != null && studentRecord.getApprovalStatus() != null)
@@ -153,7 +179,7 @@ public class AuthService {
                     throw new AuthException("Your registration is awaiting faculty approval.");
                 }
                 if (!user.isActive()) {
-                    userDao.activateApprovedStudentUser(conn, user.getId());
+                    userDao.activateApprovedStudentUser(db, user.getId());
                     user.setActive(true);
                     user.setStatus("APPROVED");
                 }
@@ -172,7 +198,7 @@ public class AuthService {
                     throw new AuthException("Your account registration was not approved. Please contact the administrator.");
                 }
                 if (user.getCompanyId() != null && !user.getCompanyId().isBlank()) {
-                    Company linkedCompany = companyDao.findById(conn, user.getCompanyId());
+                    Company linkedCompany = companyDao.findById(db, user.getCompanyId());
                     if (linkedCompany != null) {
                         String compApproval = linkedCompany.getApprovalStatus() == null
                                 ? ""
@@ -199,8 +225,8 @@ public class AuthService {
             }
 
             // Update last_login & write audit entry
-            userDao.updateLastLogin(conn, user.getId());
-            auditLogDao.insertLog(conn, "USER_LOGIN", user.getId(), user.getUsername(), user.getRole().name(),
+            userDao.updateLastLogin(db, user.getId());
+            auditLogDao.insertLog(db, "USER_LOGIN", user.getId(), user.getUsername(), user.getRole().name(),
                     "Authenticated via Java Swing desktop client (" + (portalRole != null ? portalRole.name() : user.getRole().name()) + ")");
 
             // Strip sensitive fields before returning
@@ -209,26 +235,19 @@ public class AuthService {
             return new AuthResult(user, studentRecord);
         } catch (AuthException ae) {
             throw ae;
-        } catch (SQLException ex) {
-            throw new AuthException("MySQL connection failed (" + edu.gcet.placementhub.config.DatabaseConfig.getInstance().getHost()
-                    + ":" + edu.gcet.placementhub.config.DatabaseConfig.getInstance().getPort()
-                    + "/" + edu.gcet.placementhub.config.DatabaseConfig.getInstance().getDatabase()
-                    + "): " + ex.getMessage()
-                    + "\nClick 'MySQL Connection Settings' at top-right to enter your MySQL password or test JDBC.");
+        } catch (DatabaseException | MongoException ex) {
+            throw new AuthException("MongoDB connection failed: " + ex.getMessage()
+                    + "\nPlease check your .env configuration (MONGO_URI) or MongoDB Atlas IP whitelist (0.0.0.0/0).");
         }
     }
 
     /**
-     * Explicit, user-initiated password recovery/update for an account owned by the local MySQL operator.
-     * Verifies BOTH:
-     * 1. Live MySQL Server ownership (validating the provided DB password via JDBC DriverManager), and
-     * 2. Matching account identifier + registered email in `gcet_placement_hub.users`.
-     * Never alters approval status, activation flags, or other accounts automatically.
+     * Explicit, user-initiated password recovery/update for an account in MongoDB.
      */
     public String recoverAndSetPassword(
             String identifier,
             String registeredEmail,
-            String mysqlDbPassword,
+            String dbPasswordUnused,
             String newPassword,
             String confirmPassword
     ) throws AuthException {
@@ -248,45 +267,40 @@ public class AuthService {
             throw new AuthException("New password and confirmation do not match.");
         }
 
-        edu.gcet.placementhub.config.DatabaseConfig cfg = edu.gcet.placementhub.config.DatabaseConfig.getInstance();
-        String dbPassToVerify = (mysqlDbPassword != null && !mysqlDbPassword.isEmpty())
-                ? mysqlDbPassword
-                : cfg.getPassword();
-
-        try (Connection conn = DriverManager.getConnection(cfg.getJdbcUrl(), cfg.getUser(), dbPassToVerify != null ? dbPassToVerify : "")) {
-            User target = userDao.findByLoginIdentifier(conn, cleanId);
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            User target = userDao.findByLoginIdentifier(db, cleanId);
             if (target == null) {
-                throw new AuthException("No user account found in gcet_placement_hub.users matching '" + cleanId + "'.");
+                throw new AuthException("No user account found in MongoDB matching '" + cleanId + "'.");
             }
             String storedEmail = target.getEmail() == null ? "" : target.getEmail().trim().toLowerCase(Locale.ROOT);
             if (!storedEmail.equals(cleanEmail)) {
-                throw new AuthException("Registered email does not match the email stored in MySQL for account '@" + target.getUsername() + "'.");
+                throw new AuthException("Registered email does not match the email stored for account '@" + target.getUsername() + "'.");
             }
 
             String[] hashed = PasswordHasher.hashWithBCrypt(newPassword);
-            userDao.updatePasswordHash(conn, target.getId(), hashed[0], hashed[1]);
-            auditLogDao.insertLog(conn, "PASSWORD_RECOVERY_UPDATED", target.getId(), target.getUsername(),
-                    target.getRole().name(), "Password explicitly updated via MySQL-verified account recovery dialog.");
+            userDao.updatePasswordHash(db, target.getId(), hashed[0], hashed[1]);
+            auditLogDao.insertLog(db, "PASSWORD_RECOVERY_UPDATED", target.getId(), target.getUsername(),
+                    target.getRole().name(), "Password explicitly updated via MongoDB-verified account recovery dialog.");
 
             String statusNote = "";
             String st = target.getStatus() == null ? "" : target.getStatus().trim().toUpperCase(Locale.ROOT);
             if ("PENDING".equals(st) || "PENDING_APPROVAL".equals(st) || "REJECTED".equals(st) || !target.isActive()) {
                 statusNote = "\nNote: Account approval status is currently '" + (target.getStatus() != null ? target.getStatus() : "UNKNOWN")
-                        + "' (is_active=" + target.isActive() + "). Approval gates are preserved and still apply.";
+                        + "' (isActive=" + target.isActive() + "). Approval gates are preserved and still apply.";
             }
 
             return "Password updated with BCrypt for @" + target.getUsername() + " (" + target.getRole().name() + ")."
                     + statusNote + "\nYou can now sign in manually using your new password.";
         } catch (AuthException ae) {
             throw ae;
-        } catch (SQLException ex) {
-            throw new AuthException("MySQL verification failed for " + cfg.getUser() + "@" + cfg.getHost() + ": " + ex.getMessage()
-                    + "\nEnsure MySQL is running and enter the valid MySQL database password for '" + cfg.getUser() + "'.");
+        } catch (DatabaseException | MongoException ex) {
+            throw new AuthException("MongoDB error during password recovery: " + ex.getMessage());
         }
     }
 
     /**
-     * Transactional Student Registration -> MySQL `students`, `users`, `student_skills`, `audit_logs`.
+     * Transactional Student Registration -> MongoDB `students` (embedded arrays) + `users` + `audit_logs`.
      */
     public RegistrationReceipt registerStudent(
             String fullName,
@@ -324,120 +338,67 @@ public class AuthService {
         String[] hashed = PasswordHasher.hashWithBCrypt(password);
         String passwordHash = hashed[0];
         String salt = hashed[1];
-        String studentId = "stu-" + UUID.randomUUID();
-        String userId = "usr-" + UUID.randomUUID();
         String idSuffix = cleanRoll.length() >= 4 ? cleanRoll.substring(cleanRoll.length() - 4) : cleanRoll;
         String idCard = "GCET-" + graduationYear + "-" + idSuffix;
 
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            String existingName = studentDao.findNameByRollNumber(conn, cleanRoll);
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            String existingName = studentDao.findNameByRollNumber(db, cleanRoll);
             if (existingName != null) {
                 throw new AuthException("Roll number " + cleanRoll + " is already registered to " + existingName + ".");
             }
-            String existingUser = userDao.findUsernameByEmail(conn, cleanEmail);
+            String existingUser = userDao.findUsernameByEmail(db, cleanEmail);
             if (existingUser != null) {
                 throw new AuthException("Email address " + cleanEmail + " is already registered with account (" + existingUser + ").");
             }
 
-            conn.setAutoCommit(false);
-            try {
-                String insertStudentSql = """
-                        INSERT INTO students (
-                          id, roll_number, student_id_card, full_name, email, phone, branch,
-                          academic_year, year_of_study, cgpa, tenth_percentage, inter_percentage,
-                          graduation_year, placement_status, approval_status, user_id, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'UNPLACED', 'PENDING_APPROVAL', ?, NOW())
-                        """;
-                try (PreparedStatement ps = conn.prepareStatement(insertStudentSql)) {
-                    ps.setString(1, studentId);
-                    ps.setString(2, cleanRoll);
-                    ps.setString(3, idCard);
-                    ps.setString(4, cleanName);
-                    ps.setString(5, cleanEmail);
-                    ps.setString(6, cleanPhone);
-                    ps.setString(7, cleanBranch);
-                    ps.setInt(8, academicYear);
-                    ps.setInt(9, academicYear);
-                    ps.setDouble(10, Math.round(cgpa * 100.0) / 100.0);
-                    ps.setDouble(11, 85.0);
-                    ps.setDouble(12, 88.0);
-                    ps.setInt(13, graduationYear);
-                    ps.setString(14, userId);
-                    ps.executeUpdate();
+            Student student = new Student();
+            student.setRollNumber(cleanRoll);
+            student.setStudentIdCard(idCard);
+            student.setFullName(cleanName);
+            student.setEmail(cleanEmail);
+            student.setPhone(cleanPhone);
+            student.setBranch(cleanBranch);
+            student.setAcademicYear(academicYear);
+            student.setYearOfStudy(academicYear);
+            student.setCgpa(Math.round(cgpa * 100.0) / 100.0);
+            student.setTenthPercentage(85.0);
+            student.setInterPercentage(88.0);
+            student.setGraduationYear(graduationYear);
+            student.setPlacementStatus("UNPLACED");
+            student.setApprovalStatus("PENDING_APPROVAL");
+
+            if (selectedSkills != null && !selectedSkills.isEmpty()) {
+                List<StudentSkill> skillsList = new ArrayList<>();
+                for (String skId : selectedSkills) {
+                    StudentSkill ss = new StudentSkill();
+                    ss.setSkillId(skId);
+                    ss.setProficiency(3);
+                    ss.setVerifiedByFaculty(false);
+                    skillsList.add(ss);
                 }
-
-                String insertUserSql = """
-                        INSERT INTO users (
-                          id, username, email, full_name, role, department, student_roll_number,
-                          password_hash, salt, status, is_active, created_at
-                        ) VALUES (?, ?, ?, ?, 'STUDENT', ?, ?, ?, ?, 'PENDING_APPROVAL', FALSE, NOW())
-                        """;
-                try (PreparedStatement ps = conn.prepareStatement(insertUserSql)) {
-                    ps.setString(1, userId);
-                    ps.setString(2, cleanRoll);
-                    ps.setString(3, cleanEmail);
-                    ps.setString(4, cleanName);
-                    ps.setString(5, cleanBranch);
-                    ps.setString(6, cleanRoll);
-                    ps.setString(7, passwordHash);
-                    ps.setString(8, salt);
-                    ps.executeUpdate();
-                }
-
-                if (selectedSkills != null && !selectedSkills.isEmpty()) {
-                    Map<String, String> dbSkills = new LinkedHashMap<>();
-                    try (Statement st = conn.createStatement();
-                         ResultSet rs = st.executeQuery("SELECT id, name FROM skills")) {
-                        while (rs.next()) {
-                            dbSkills.put(rs.getString("id"), rs.getString("name"));
-                        }
-                    }
-                    String insertSkillSql = "INSERT IGNORE INTO student_skills (student_id, skill_id, proficiency, verified_by_faculty) VALUES (?, ?, 3, FALSE)";
-                    try (PreparedStatement psSkill = conn.prepareStatement(insertSkillSql)) {
-                        for (String skInput : selectedSkills) {
-                            String raw = skInput.trim().toLowerCase(Locale.ROOT);
-                            for (Map.Entry<String, String> entry : dbSkills.entrySet()) {
-                                String id = entry.getKey().toLowerCase(Locale.ROOT);
-                                String name = entry.getValue().toLowerCase(Locale.ROOT);
-                                if (id.equals(raw) || name.equals(raw) || name.contains(raw)) {
-                                    psSkill.setString(1, studentId);
-                                    psSkill.setString(2, entry.getKey());
-                                    psSkill.addBatch();
-                                    break;
-                                }
-                            }
-                        }
-                        psSkill.executeBatch();
-                    }
-                }
-
-                auditLogDao.insertLog(conn, "STUDENT_REGISTERED", userId, cleanRoll, "STUDENT",
-                        "New student registration submitted: " + cleanName + " (" + cleanRoll + ") - Department: " + cleanBranch + " - Awaiting Faculty Approval");
-
-                conn.commit();
-            } catch (SQLException txEx) {
-                conn.rollback();
-                throw txEx;
-            } finally {
-                conn.setAutoCommit(true);
+                student.setSkills(skillsList);
             }
 
-            String assignedFaculty = DeptNormalizer.assignedCoordinatorLabel(cleanBranch);
+            studentDao.insertStudentWithUser(db, student, passwordHash, salt);
+            auditLogDao.insertLog(db, "STUDENT_REGISTERED", student.getId(), cleanRoll, "STUDENT",
+                    "New student self-registration: " + cleanName + " (" + cleanRoll + ") - Awaiting Department Faculty Approval");
+
             return new RegistrationReceipt(
-                    studentId,
+                    student.getId(),
                     cleanName,
                     cleanRoll,
-                    "Registration submitted successfully. Your student account is now awaiting departmental verification by " + assignedFaculty + "."
+                    "Student registration submitted successfully. Your account is awaiting Department Faculty Coordinator verification."
             );
         } catch (AuthException ae) {
             throw ae;
-        } catch (SQLException ex) {
+        } catch (DatabaseException | MongoException ex) {
             throw new AuthException("Database error during student registration: " + ex.getMessage());
         }
     }
 
     /**
-     * Transactional Faculty Registration -> MySQL `users`, `faculty`, `audit_logs`.
+     * Transactional Faculty Registration -> MongoDB `users`, `faculty`, `audit_logs`.
      */
     public RegistrationReceipt registerFaculty(
             String fullName,
@@ -469,59 +430,47 @@ public class AuthService {
         }
 
         String[] hashed = PasswordHasher.hashWithBCrypt(password);
-        String userId = "usr-fac-" + UUID.randomUUID();
-        String facId = "fac-" + UUID.randomUUID();
 
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            if (userDao.existsByUsername(conn, cleanEmpId)) {
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            if (userDao.existsByUsername(db, cleanEmpId)) {
                 throw new AuthException("Faculty ID " + cleanEmpId + " is already registered.");
             }
-            if (userDao.findUsernameByEmail(conn, cleanEmail) != null) {
+            if (userDao.findUsernameByEmail(db, cleanEmail) != null) {
                 throw new AuthException("Email address " + cleanEmail + " is already registered.");
             }
 
-            conn.setAutoCommit(false);
-            try {
-                try (PreparedStatement ps = conn.prepareStatement("""
-                        INSERT INTO users (id, username, email, full_name, role, department, password_hash, salt, status, is_active, created_at)
-                        VALUES (?, ?, ?, ?, 'FACULTY', ?, ?, ?, 'PENDING_APPROVAL', FALSE, NOW())
-                        """)) {
-                    ps.setString(1, userId);
-                    ps.setString(2, cleanEmpId.toLowerCase(Locale.ROOT));
-                    ps.setString(3, cleanEmail);
-                    ps.setString(4, cleanName);
-                    ps.setString(5, cleanDept);
-                    ps.setString(6, hashed[0]);
-                    ps.setString(7, hashed[1]);
-                    ps.executeUpdate();
-                }
+            User u = new User();
+            u.setUsername(cleanEmpId.toLowerCase(Locale.ROOT));
+            u.setEmail(cleanEmail);
+            u.setFullName(cleanName);
+            u.setRole(UserRole.FACULTY);
+            u.setDepartment(cleanDept);
+            u.setDesignation(cleanDesig);
+            u.setEmployeeId(cleanEmpId);
+            u.setPhone(cleanPhone);
+            u.setStatus("PENDING_APPROVAL");
+            u.setActive(false);
 
-                try (PreparedStatement ps = conn.prepareStatement("""
-                        INSERT INTO faculty (id, faculty_id, employee_id, full_name, department, designation, email, phone, user_id, faculty_approved, admin_approved, status, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, FALSE, 'PENDING_APPROVAL', NOW())
-                        """)) {
-                    ps.setString(1, facId);
-                    ps.setString(2, cleanEmpId);
-                    ps.setString(3, cleanEmpId);
-                    ps.setString(4, cleanName);
-                    ps.setString(5, cleanDept);
-                    ps.setString(6, cleanDesig);
-                    ps.setString(7, cleanEmail);
-                    ps.setString(8, cleanPhone);
-                    ps.setString(9, userId);
-                    ps.executeUpdate();
-                }
+            String userId = userDao.insertUser(db, u, hashed[0], hashed[1]);
 
-                auditLogDao.insertLog(conn, "FACULTY_REGISTERED", userId, cleanEmpId, "FACULTY",
-                        "New faculty registration: " + cleanName + " (" + cleanEmpId + ") - Awaiting College Administrator Approval");
+            Faculty f = new Faculty();
+            f.setFacultyId(cleanEmpId);
+            f.setEmployeeId(cleanEmpId);
+            f.setFullName(cleanName);
+            f.setDepartment(cleanDept);
+            f.setDesignation(cleanDesig);
+            f.setEmail(cleanEmail);
+            f.setPhone(cleanPhone);
+            f.setUserId(userId);
+            f.setFacultyApproved(true);
+            f.setAdminApproved(false);
+            f.setStatus("PENDING_APPROVAL");
 
-                conn.commit();
-            } catch (SQLException txEx) {
-                conn.rollback();
-                throw txEx;
-            } finally {
-                conn.setAutoCommit(true);
-            }
+            String facId = facultyDao.insertFaculty(db, f);
+
+            auditLogDao.insertLog(db, "FACULTY_REGISTERED", userId, cleanEmpId, "FACULTY",
+                    "New faculty registration: " + cleanName + " (" + cleanEmpId + ") - Awaiting College Administrator Approval");
 
             return new RegistrationReceipt(
                     facId,
@@ -531,13 +480,13 @@ public class AuthService {
             );
         } catch (AuthException ae) {
             throw ae;
-        } catch (SQLException ex) {
+        } catch (DatabaseException | MongoException ex) {
             throw new AuthException("Database error during faculty registration: " + ex.getMessage());
         }
     }
 
     /**
-     * Transactional Company Registration -> MySQL `companies`, `users`, `audit_logs`.
+     * Transactional Company Registration -> MongoDB `companies`, `users`, `audit_logs`.
      */
     public RegistrationReceipt registerCompany(
             String companyName,
@@ -575,58 +524,42 @@ public class AuthService {
         String companyUsername = "recruiter_" + slug;
 
         String[] hashed = PasswordHasher.hashWithBCrypt(password);
-        String userId = "usr-comp-" + UUID.randomUUID();
-        String compId = "comp-" + UUID.randomUUID();
 
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            if (userDao.existsByEmailOrUsername(conn, cleanEmail, companyUsername)) {
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            if (userDao.existsByEmailOrUsername(db, cleanEmail, companyUsername)) {
                 throw new AuthException("An account with email " + cleanEmail + " or company name already exists.");
             }
 
-            conn.setAutoCommit(false);
-            try {
-                try (PreparedStatement ps = conn.prepareStatement("""
-                        INSERT INTO companies (id, name, industry, website, location, description, hr_name, hr_email, hr_phone, tier, approval_status, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_APPROVAL', NOW())
-                        """)) {
-                    ps.setString(1, compId);
-                    ps.setString(2, cleanCompName);
-                    ps.setString(3, cleanIndustry);
-                    ps.setString(4, cleanWebsite);
-                    ps.setString(5, cleanLocation);
-                    ps.setString(6, "Recruitment partnership for " + cleanCompName);
-                    ps.setString(7, cleanHrName);
-                    ps.setString(8, cleanEmail);
-                    ps.setString(9, cleanPhone);
-                    ps.setString(10, cleanTier);
-                    ps.executeUpdate();
-                }
+            Company c = new Company();
+            c.setName(cleanCompName);
+            c.setIndustry(cleanIndustry);
+            c.setWebsite(cleanWebsite);
+            c.setLocation(cleanLocation);
+            c.setDescription("Recruitment partnership for " + cleanCompName);
+            c.setHrName(cleanHrName);
+            c.setHrEmail(cleanEmail);
+            c.setHrPhone(cleanPhone);
+            c.setTier(cleanTier);
+            c.setApprovalStatus("PENDING_APPROVAL");
 
-                try (PreparedStatement ps = conn.prepareStatement("""
-                        INSERT INTO users (id, username, email, full_name, role, department, company_id, password_hash, salt, status, is_active, created_at)
-                        VALUES (?, ?, ?, ?, 'COMPANY', ?, ?, ?, ?, 'PENDING_APPROVAL', FALSE, NOW())
-                        """)) {
-                    ps.setString(1, userId);
-                    ps.setString(2, companyUsername);
-                    ps.setString(3, cleanEmail);
-                    ps.setString(4, cleanHrName + " (" + cleanCompName + ")");
-                    ps.setString(5, cleanCompName);
-                    ps.setString(6, compId);
-                    ps.setString(7, hashed[0]);
-                    ps.setString(8, hashed[1]);
-                    ps.executeUpdate();
-                }
+            String compId = companyDao.insertCompany(db, c, null, null);
 
-                auditLogDao.insertLog(conn, "COMPANY_REGISTERED", userId, companyUsername, "COMPANY",
-                        "New corporate recruiter registration: " + cleanCompName + " - Awaiting College Placement Admin Approval");
+            User u = new User();
+            u.setUsername(companyUsername);
+            u.setEmail(cleanEmail);
+            u.setFullName(cleanHrName + " (" + cleanCompName + ")");
+            u.setRole(UserRole.COMPANY);
+            u.setDepartment(cleanCompName);
+            u.setCompanyId(compId);
+            u.setCompanyName(cleanCompName);
+            u.setStatus("PENDING_APPROVAL");
+            u.setActive(false);
 
-                conn.commit();
-            } catch (SQLException txEx) {
-                conn.rollback();
-                throw txEx;
-            } finally {
-                conn.setAutoCommit(true);
-            }
+            String userId = userDao.insertUser(db, u, hashed[0], hashed[1]);
+
+            auditLogDao.insertLog(db, "COMPANY_REGISTERED", userId, companyUsername, "COMPANY",
+                    "New corporate recruiter registration: " + cleanCompName + " - Awaiting College Placement Admin Approval");
 
             return new RegistrationReceipt(
                     compId,
@@ -636,7 +569,7 @@ public class AuthService {
             );
         } catch (AuthException ae) {
             throw ae;
-        } catch (SQLException ex) {
+        } catch (DatabaseException | MongoException ex) {
             throw new AuthException("Database error during company registration: " + ex.getMessage());
         }
     }

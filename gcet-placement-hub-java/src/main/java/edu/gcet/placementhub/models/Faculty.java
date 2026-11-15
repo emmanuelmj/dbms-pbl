@@ -37,6 +37,9 @@ public class Faculty {
     public String getEmployeeId() { return employeeId; }
     public void setEmployeeId(String employeeId) { this.employeeId = employeeId; }
 
+    public String getFacultyId() { return employeeId; }
+    public void setFacultyId(String facultyId) { this.employeeId = facultyId; }
+
     public String getFullName() { return fullName; }
     public void setFullName(String fullName) { this.fullName = fullName; }
 

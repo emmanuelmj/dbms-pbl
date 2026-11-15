@@ -4,7 +4,7 @@ import edu.gcet.placementhub.models.*;
 import edu.gcet.placementhub.models.GovernanceModels.*;
 import edu.gcet.placementhub.services.GovernanceService;
 import edu.gcet.placementhub.services.GovernanceService.AuditLogBundle;
-import edu.gcet.placementhub.services.StudentManagementService.OperationResult;
+import edu.gcet.placementhub.utils.OperationResult;
 
 import javax.swing.*;
 import java.util.List;
@@ -308,7 +308,7 @@ public class GovernanceController {
                     DbStatus fallback = new DbStatus();
                     fallback.setConnected(false);
                     fallback.setLastError(ex.getMessage());
-                    onComplete.accept(new ExtendedDbStatus(fallback, "Unavailable", -1, List.of(), 0, 17));
+                    onComplete.accept(ExtendedDbStatus.unavailable(fallback, ex.getMessage()));
                 }
             }
         }.execute();

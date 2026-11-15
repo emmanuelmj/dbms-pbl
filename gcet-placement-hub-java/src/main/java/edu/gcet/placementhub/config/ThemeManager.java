@@ -23,6 +23,7 @@ public final class ThemeManager {
     public static final Color BLUE_ELECTRIC = new Color(0x26, 0x84, 0xFF);      // #2684FF
     public static final Color BLUE_HOVER = new Color(0x1F, 0x73, 0xE6);         // #1F73E6
     public static final Color CYAN_ACCENT = new Color(0x32, 0xC5, 0xF4);        // #32C5F4
+    public static final Color CYAN_PRIMARY = new Color(0x06, 0xB6, 0xD4);       // #06B6D4
     public static final Color CYAN_DARK = new Color(0x08, 0x91, 0xB2);          // #0891B2
 
     public static final Color EMERALD_PRIMARY = new Color(0x05, 0x96, 0x69);    // #059669
@@ -75,6 +76,10 @@ public final class ThemeManager {
 
     public static Font monoFont(int style, int size) {
         return new Font(Font.MONOSPACED, style, size);
+    }
+
+    public static Font monoFont(int style, float size) {
+        return new Font(Font.MONOSPACED, style, Math.round(size));
     }
 
     public static void initFlatLaf(boolean startDark) {

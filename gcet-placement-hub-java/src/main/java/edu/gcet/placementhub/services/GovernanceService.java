@@ -1,20 +1,21 @@
 package edu.gcet.placementhub.services;
 
+import com.mongodb.MongoException;
+import com.mongodb.client.MongoDatabase;
 import edu.gcet.placementhub.dao.*;
 import edu.gcet.placementhub.database.DatabaseConnection;
+import edu.gcet.placementhub.database.DatabaseException;
 import edu.gcet.placementhub.models.*;
 import edu.gcet.placementhub.models.GovernanceModels.*;
-import edu.gcet.placementhub.services.StudentManagementService.OperationResult;
 import edu.gcet.placementhub.utils.DeptNormalizer;
+import edu.gcet.placementhub.utils.OperationResult;
 import edu.gcet.placementhub.utils.PasswordHasher;
 
-import java.sql.Connection;
-import java.sql.SQLException;
 import java.time.LocalDate;
 import java.util.*;
 
 /**
- * Pure JDBC Phase 5 Governance, Approvals, Analytics, Settings, Audit & Diagnostics Service.
+ * MongoDB-backed Phase 5 Governance, Approvals, Analytics, Settings, Audit & Diagnostics Service.
  * Strictly enforces RBAC rules:
  *  - Student approvals: Faculty / TPO only (Department-scoped via DeptNormalizer); Admins/Executives blocked.
  *  - Faculty & Company approvals: Admin Roles only (PRINCIPAL, CHAIRMAN, VICE_CHAIRMAN, ADMIN).
@@ -52,8 +53,9 @@ public class GovernanceService {
                     "Access Restricted: Only Faculty Coordinators, Placement Officers, or College Administrators may open the Approval Center.");
         }
 
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            List<Student> allStudents = studentDao.findAll(conn);
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            List<Student> allStudents = studentDao.findAll(db);
             List<Student> visibleStudents = new ArrayList<>();
             if (role == UserRole.FACULTY) {
                 for (Student s : allStudents) {
@@ -62,33 +64,26 @@ public class GovernanceService {
                         visibleStudents.add(s);
                     }
                 }
-            } else {
-                // Placement Officer and Admins can inspect list (Admins remain read-only on student tab)
+            } else if (role == UserRole.PLACEMENT_OFFICER) {
                 visibleStudents.addAll(allStudents);
             }
 
-            List<Faculty> facultyList = isAdmin ? facultyDao.findAll(conn) : List.of();
-            List<Company> companyList = isAdmin ? companyDao.findAll(conn) : List.of();
-            List<AdminRequest> adminRequests = isAdmin ? approvalDao.findAllAdminRequests(conn) : List.of();
-            List<ApprovalRecord> history = approvalDao.findApprovalHistory(conn, 250);
+            List<Faculty> visibleFaculty = isAdmin ? facultyDao.findAll(db) : List.of();
+            List<Company> visibleCompanies = isAdmin ? companyDao.findAll(db) : List.of();
+            List<AdminRequest> adminReqs = isAdmin ? approvalDao.findAllAdminRequests(db) : List.of();
+            List<ApprovalRecord> history = approvalDao.findApprovalHistory(db, 100);
 
-            if (role == UserRole.FACULTY) {
-                List<ApprovalRecord> scopedHistory = new ArrayList<>();
-                for (ApprovalRecord r : history) {
-                    if ("STUDENT_REGISTRATION".equalsIgnoreCase(r.getRequestType())
-                            && (DeptNormalizer.isFacultyAuthorizedForStudent(
-                            actor.getAuthorizedDepartments(), actor.getUsername(), r.getDepartment())
-                            || actor.getId().equals(r.getApproverId()))) {
-                        scopedHistory.add(r);
-                    }
-                }
-                history = scopedHistory;
-            }
-
-            return new ApprovalBundle(visibleStudents, facultyList, companyList, adminRequests, history, null);
-        } catch (SQLException ex) {
+            return new ApprovalBundle(
+                    visibleStudents,
+                    visibleFaculty,
+                    visibleCompanies,
+                    adminReqs,
+                    history,
+                    null
+            );
+        } catch (DatabaseException | MongoException ex) {
             return new ApprovalBundle(List.of(), List.of(), List.of(), List.of(), List.of(),
-                    "Failed to load Approval Center data from MySQL: " + ex.getMessage());
+                    "Failed to load Approval Center data from MongoDB: " + ex.getMessage());
         }
     }
 
@@ -110,78 +105,68 @@ public class GovernanceService {
             return OperationResult.fail("A rejection reason is mandatory when rejecting student registrations.");
         }
 
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            conn.setAutoCommit(false);
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
             int processed = 0;
-            try {
-                for (String sid : studentIds) {
-                    Student stu = studentDao.findByIdOrRoll(conn, sid);
-                    if (stu == null) continue;
+            for (String sid : studentIds) {
+                Student stu = studentDao.findByIdOrRoll(db, sid);
+                if (stu == null) continue;
 
-                    if (role == UserRole.FACULTY && !DeptNormalizer.isFacultyAuthorizedForStudent(
-                            actor.getAuthorizedDepartments(), actor.getUsername(), stu.getBranch())) {
-                        conn.rollback();
-                        return OperationResult.fail("Department Access Denied: You are not authorized to clear students in branch \""
-                                + stu.getBranch() + "\" (" + stu.getRollNumber() + ").");
-                    }
-
-                    approvalDao.updateStudentApproval(
-                            conn,
-                            stu.getId(),
-                            stu.getUserId(),
-                            stu.getRollNumber(),
-                            approve,
-                            approve ? null : cleanReason,
-                            actor.getId(),
-                            actor.getFullName()
-                    );
-
-                    ApprovalRecord rec = new ApprovalRecord();
-                    rec.setRequestType("STUDENT_REGISTRATION");
-                    rec.setTargetId(stu.getId());
-                    rec.setTargetName(stu.getFullName());
-                    rec.setStudentRollNumber(stu.getRollNumber());
-                    rec.setDepartment(stu.getBranch());
-                    rec.setApproverId(actor.getId());
-                    rec.setApproverName(actor.getFullName());
-                    rec.setApproverRole(role.name());
-                    rec.setDecision(approve ? "APPROVED" : "REJECTED");
-                    rec.setComments(approve
-                            ? "Verified departmental academic credentials & activated student portal login."
-                            : cleanReason);
-                    approvalDao.insertApprovalRecord(conn, rec);
-
-                    auditLogDao.insertLog(
-                            conn,
-                            approve ? "STUDENT_REGISTRATION_APPROVED" : "STUDENT_REGISTRATION_REJECTED",
-                            actor.getId(),
-                            actor.getUsername(),
-                            role.name(),
-                            (approve ? "Approved" : "Rejected") + " student " + stu.getFullName()
-                                    + " (" + stu.getRollNumber() + ", " + stu.getBranch() + ")."
-                                    + (approve ? "" : " Reason: " + cleanReason)
-                    );
-                    processed++;
+                if (role == UserRole.FACULTY && !DeptNormalizer.isFacultyAuthorizedForStudent(
+                        actor.getAuthorizedDepartments(), actor.getUsername(), stu.getBranch())) {
+                    return OperationResult.fail("Department Access Denied: You are not authorized to clear students in branch \""
+                            + stu.getBranch() + "\" (" + stu.getRollNumber() + ").");
                 }
 
-                if (processed == 0) {
-                    conn.rollback();
-                    return OperationResult.fail("No matching student records found in MySQL.");
-                }
-
-                conn.commit();
-                return OperationResult.ok(
-                        (approve ? "Approved " : "Rejected ") + processed + " student registration(s) in MySQL.",
-                        processed
+                approvalDao.updateStudentApproval(
+                        db,
+                        stu.getId(),
+                        stu.getUserId(),
+                        stu.getRollNumber(),
+                        approve,
+                        approve ? null : cleanReason,
+                        actor.getId(),
+                        actor.getFullName()
                 );
-            } catch (SQLException txEx) {
-                conn.rollback();
-                throw txEx;
-            } finally {
-                conn.setAutoCommit(true);
+
+                ApprovalRecord rec = new ApprovalRecord();
+                rec.setRequestType("STUDENT_REGISTRATION");
+                rec.setTargetId(stu.getId());
+                rec.setTargetName(stu.getFullName());
+                rec.setStudentRollNumber(stu.getRollNumber());
+                rec.setDepartment(stu.getBranch());
+                rec.setApproverId(actor.getId());
+                rec.setApproverName(actor.getFullName());
+                rec.setApproverRole(role.name());
+                rec.setDecision(approve ? "APPROVED" : "REJECTED");
+                rec.setComments(approve
+                        ? "Verified departmental academic credentials & activated student portal login."
+                        : cleanReason);
+                approvalDao.insertApprovalRecord(db, rec);
+
+                auditLogDao.insertLog(
+                        db,
+                        approve ? "STUDENT_REGISTRATION_APPROVED" : "STUDENT_REGISTRATION_REJECTED",
+                        actor.getId(),
+                        actor.getUsername(),
+                        role.name(),
+                        (approve ? "Approved" : "Rejected") + " student " + stu.getFullName()
+                                + " (" + stu.getRollNumber() + ", " + stu.getBranch() + ")."
+                                + (approve ? "" : " Reason: " + cleanReason)
+                );
+                processed++;
             }
-        } catch (SQLException ex) {
-            return OperationResult.fail("Failed to save student decision in MySQL: " + ex.getMessage());
+
+            if (processed == 0) {
+                return OperationResult.fail("No matching student records found in MongoDB.");
+            }
+
+            return OperationResult.ok(
+                    (approve ? "Approved " : "Rejected ") + processed + " student registration(s) in MongoDB.",
+                    processed
+            );
+        } catch (DatabaseException | MongoException ex) {
+            return OperationResult.fail("Failed to save student decision in MongoDB: " + ex.getMessage());
         }
     }
 
@@ -197,57 +182,49 @@ public class GovernanceService {
             return OperationResult.fail("A mandatory rejection reason is required when rejecting a Faculty registration.");
         }
 
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            conn.setAutoCommit(false);
-            try {
-                approvalDao.updateFacultyApproval(
-                        conn,
-                        target.getId(),
-                        target.getUserId(),
-                        target.getEmail(),
-                        approve,
-                        approve ? null : cleanReason,
-                        actor.getId(),
-                        actor.getFullName()
-                );
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            approvalDao.updateFacultyApproval(
+                    db,
+                    target.getId(),
+                    target.getUserId(),
+                    target.getEmail(),
+                    approve,
+                    approve ? null : cleanReason,
+                    actor.getId(),
+                    actor.getFullName()
+            );
 
-                ApprovalRecord rec = new ApprovalRecord();
-                rec.setRequestType("FACULTY_REGISTRATION");
-                rec.setTargetId(target.getId());
-                rec.setTargetName(target.getFullName());
-                rec.setDepartment(target.getDepartment());
-                rec.setApproverId(actor.getId());
-                rec.setApproverName(actor.getFullName());
-                rec.setApproverRole(actor.getRole().name());
-                rec.setDecision(approve ? "APPROVED" : "REJECTED");
-                rec.setComments(approve
-                        ? "Authorized faculty coordinator access & departmental clearance privileges."
-                        : cleanReason);
-                approvalDao.insertApprovalRecord(conn, rec);
+            ApprovalRecord rec = new ApprovalRecord();
+            rec.setRequestType("FACULTY_REGISTRATION");
+            rec.setTargetId(target.getId());
+            rec.setTargetName(target.getFullName());
+            rec.setDepartment(target.getDepartment());
+            rec.setApproverId(actor.getId());
+            rec.setApproverName(actor.getFullName());
+            rec.setApproverRole(actor.getRole().name());
+            rec.setDecision(approve ? "APPROVED" : "REJECTED");
+            rec.setComments(approve
+                    ? "Authorized faculty coordinator access & departmental clearance privileges."
+                    : cleanReason);
+            approvalDao.insertApprovalRecord(db, rec);
 
-                auditLogDao.insertLog(
-                        conn,
-                        approve ? "FACULTY_APPROVED" : "FACULTY_REJECTED",
-                        actor.getId(),
-                        actor.getUsername(),
-                        actor.getRole().name(),
-                        (approve ? "Approved" : "Rejected") + " faculty coordinator " + target.getFullName()
-                                + " (" + target.getEmployeeId() + ", " + target.getDepartment() + ")."
-                                + (approve ? "" : " Reason: " + cleanReason)
-                );
-                conn.commit();
-                return OperationResult.ok(
-                        "Faculty account \"" + target.getFullName() + "\" marked " + (approve ? "ACTIVE" : "REJECTED") + " in MySQL.",
-                        null
-                );
-            } catch (SQLException txEx) {
-                conn.rollback();
-                throw txEx;
-            } finally {
-                conn.setAutoCommit(true);
-            }
-        } catch (SQLException ex) {
-            return OperationResult.fail("Failed to update faculty approval in MySQL: " + ex.getMessage());
+            auditLogDao.insertLog(
+                    db,
+                    approve ? "FACULTY_APPROVED" : "FACULTY_REJECTED",
+                    actor.getId(),
+                    actor.getUsername(),
+                    actor.getRole().name(),
+                    (approve ? "Approved" : "Rejected") + " faculty coordinator " + target.getFullName()
+                            + " (" + target.getEmployeeId() + ", " + target.getDepartment() + ")."
+                            + (approve ? "" : " Reason: " + cleanReason)
+            );
+            return OperationResult.ok(
+                    "Faculty account \"" + target.getFullName() + "\" marked " + (approve ? "ACTIVE" : "REJECTED") + " in MongoDB.",
+                    null
+            );
+        } catch (DatabaseException | MongoException ex) {
+            return OperationResult.fail("Failed to update faculty approval in MongoDB: " + ex.getMessage());
         }
     }
 
@@ -263,62 +240,55 @@ public class GovernanceService {
             return OperationResult.fail("A mandatory rejection reason is required when rejecting a Company registration.");
         }
 
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            Company existing = companyDao.findById(conn, target.getId());
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            Company existing = companyDao.findById(db, target.getId());
             if (existing == null) {
-                return OperationResult.fail("Company record no longer exists in MySQL.");
+                return OperationResult.fail("Company record no longer exists in MongoDB.");
             }
-            conn.setAutoCommit(false);
-            try {
-                approvalDao.updateCompanyApprovalAndLinkedUsers(
-                        conn,
-                        existing.getId(),
-                        existing.getName(),
-                        existing.getHrName(),
-                        existing.getHrEmail(),
-                        approve,
-                        approve ? null : cleanReason,
-                        actor.getId(),
-                        actor.getFullName()
-                );
 
-                ApprovalRecord rec = new ApprovalRecord();
-                rec.setRequestType("COMPANY_REGISTRATION");
-                rec.setTargetId(existing.getId());
-                rec.setTargetName(existing.getName());
-                rec.setDepartment(existing.getIndustry());
-                rec.setApproverId(actor.getId());
-                rec.setApproverName(actor.getFullName());
-                rec.setApproverRole(actor.getRole().name());
-                rec.setDecision(approve ? "APPROVED" : "REJECTED");
-                rec.setComments(approve
-                        ? "Corporate partner legitimacy verified; campus placement drives enabled."
-                        : cleanReason);
-                approvalDao.insertApprovalRecord(conn, rec);
+            approvalDao.updateCompanyApprovalAndLinkedUsers(
+                    db,
+                    existing.getId(),
+                    existing.getName(),
+                    existing.getHrName(),
+                    existing.getHrEmail(),
+                    approve,
+                    approve ? null : cleanReason,
+                    actor.getId(),
+                    actor.getFullName()
+            );
 
-                auditLogDao.insertLog(
-                        conn,
-                        approve ? "COMPANY_APPROVED" : "COMPANY_REJECTED",
-                        actor.getId(),
-                        actor.getUsername(),
-                        actor.getRole().name(),
-                        (approve ? "Approved" : "Rejected") + " corporate partner \"" + existing.getName()
-                                + "\" (" + existing.getIndustry() + ")."
-                                + (approve ? "" : " Reason: " + cleanReason)
-                );
-                conn.commit();
-                return OperationResult.ok(
-                        "Company \"" + existing.getName() + "\" updated to " + (approve ? "APPROVED" : "REJECTED") + " in MySQL.",
-                        null
-                );
-            } catch (SQLException txEx) {
-                conn.rollback();
-                throw txEx;
-            } finally {
-                conn.setAutoCommit(true);
-            }
-        } catch (SQLException ex) {
-            return OperationResult.fail("Failed to update company approval in MySQL: " + ex.getMessage());
+            ApprovalRecord rec = new ApprovalRecord();
+            rec.setRequestType("COMPANY_REGISTRATION");
+            rec.setTargetId(existing.getId());
+            rec.setTargetName(existing.getName());
+            rec.setDepartment(existing.getIndustry());
+            rec.setApproverId(actor.getId());
+            rec.setApproverName(actor.getFullName());
+            rec.setApproverRole(actor.getRole().name());
+            rec.setDecision(approve ? "APPROVED" : "REJECTED");
+            rec.setComments(approve
+                    ? "Corporate partner legitimacy verified; campus placement drives enabled."
+                    : cleanReason);
+            approvalDao.insertApprovalRecord(db, rec);
+
+            auditLogDao.insertLog(
+                    db,
+                    approve ? "COMPANY_APPROVED" : "COMPANY_REJECTED",
+                    actor.getId(),
+                    actor.getUsername(),
+                    actor.getRole().name(),
+                    (approve ? "Approved" : "Rejected") + " corporate partner \"" + existing.getName()
+                            + "\" (" + existing.getIndustry() + ")."
+                            + (approve ? "" : " Reason: " + cleanReason)
+            );
+            return OperationResult.ok(
+                    "Company \"" + existing.getName() + "\" updated to " + (approve ? "APPROVED" : "REJECTED") + " in MongoDB.",
+                    null
+            );
+        } catch (DatabaseException | MongoException ex) {
+            return OperationResult.fail("Failed to update company approval in MongoDB: " + ex.getMessage());
         }
     }
 
@@ -334,69 +304,61 @@ public class GovernanceService {
             return OperationResult.fail("A mandatory rejection reason is required when declining an Admin privilege request.");
         }
 
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            AdminRequest req = approvalDao.findAdminRequestById(conn, requestId);
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            AdminRequest req = approvalDao.findAdminRequestById(db, requestId);
             if (req == null) {
-                return OperationResult.fail("Admin privilege request not found in MySQL.");
+                return OperationResult.fail("Admin privilege request not found in MongoDB.");
             }
             if (!"PENDING".equalsIgnoreCase(req.getStatus())) {
                 return OperationResult.fail("This privilege request has already been processed (" + req.getStatus() + ").");
             }
 
-            conn.setAutoCommit(false);
-            try {
-                String decision = approve ? "APPROVED" : "REJECTED";
-                String effectiveNotes = cleanNotes.isEmpty()
-                        ? "Principal granted " + req.getRequestedRole() + " privilege."
-                        : cleanNotes;
+            String decision = approve ? "APPROVED" : "REJECTED";
+            String effectiveNotes = cleanNotes.isEmpty()
+                    ? "Principal granted " + req.getRequestedRole() + " privilege."
+                    : cleanNotes;
 
-                approvalDao.updateAdminRequestDecision(
-                        conn, req.getId(), decision, effectiveNotes, actor.getId(), actor.getFullName()
-                );
+            approvalDao.updateAdminRequestDecision(
+                    db, req.getId(), decision, effectiveNotes, actor.getId(), actor.getFullName()
+            );
 
-                if (approve) {
-                    approvalDao.elevateUserRole(conn, req.getUserId(), req.getRequestedRole());
-                }
-
-                ApprovalRecord rec = new ApprovalRecord();
-                rec.setRequestType("ADMIN_PRIVILEGE");
-                rec.setTargetId(req.getId());
-                rec.setTargetName(req.getApplicantName() + " (" + req.getRequestedRole() + ")");
-                rec.setDepartment(req.getDepartment());
-                rec.setApproverId(actor.getId());
-                rec.setApproverName(actor.getFullName());
-                rec.setApproverRole(actor.getRole().name());
-                rec.setDecision(decision);
-                rec.setComments(effectiveNotes);
-                approvalDao.insertApprovalRecord(conn, rec);
-
-                auditLogDao.insertLog(
-                        conn,
-                        approve ? "ADMIN_PRIVILEGE_GRANTED" : "ADMIN_PRIVILEGE_DECLINED",
-                        actor.getId(),
-                        actor.getUsername(),
-                        actor.getRole().name(),
-                        "Principal " + (approve ? "granted" : "declined") + " " + req.getRequestedRole()
-                                + " privilege for " + req.getApplicantName() + ". Notes: " + effectiveNotes
-                );
-                conn.commit();
-                return OperationResult.ok(
-                        "Admin privilege petition for \"" + req.getApplicantName() + "\" marked " + decision + ".",
-                        null
-                );
-            } catch (SQLException txEx) {
-                conn.rollback();
-                throw txEx;
-            } finally {
-                conn.setAutoCommit(true);
+            if (approve) {
+                approvalDao.elevateUserRole(db, req.getUserId(), req.getRequestedRole());
             }
-        } catch (SQLException ex) {
-            return OperationResult.fail("Failed to record Principal decision in MySQL: " + ex.getMessage());
+
+            ApprovalRecord rec = new ApprovalRecord();
+            rec.setRequestType("ADMIN_PRIVILEGE");
+            rec.setTargetId(req.getId());
+            rec.setTargetName(req.getApplicantName() + " (" + req.getRequestedRole() + ")");
+            rec.setDepartment(req.getDepartment());
+            rec.setApproverId(actor.getId());
+            rec.setApproverName(actor.getFullName());
+            rec.setApproverRole(actor.getRole().name());
+            rec.setDecision(decision);
+            rec.setComments(effectiveNotes);
+            approvalDao.insertApprovalRecord(db, rec);
+
+            auditLogDao.insertLog(
+                    db,
+                    approve ? "ADMIN_PRIVILEGE_GRANTED" : "ADMIN_PRIVILEGE_DECLINED",
+                    actor.getId(),
+                    actor.getUsername(),
+                    actor.getRole().name(),
+                    "Principal " + (approve ? "granted" : "declined") + " " + req.getRequestedRole()
+                            + " privilege for " + req.getApplicantName() + ". Notes: " + effectiveNotes
+            );
+            return OperationResult.ok(
+                    "Admin privilege petition for \"" + req.getApplicantName() + "\" marked " + decision + ".",
+                    null
+            );
+        } catch (DatabaseException | MongoException ex) {
+            return OperationResult.fail("Failed to record Principal decision in MongoDB: " + ex.getMessage());
         }
     }
 
     // -------------------------------------------------------------------------
-    // 2. ANALYTICS & REPORTS (LIVE MYSQL QUERIES + STRICT RBAC SCOPING)
+    // 2. ANALYTICS & REPORTS (LIVE MONGODB QUERIES + STRICT RBAC SCOPING)
     // -------------------------------------------------------------------------
 
     public ReportBundle generateReportBundle(User actor, ReportFilter filter) {
@@ -405,12 +367,13 @@ public class GovernanceService {
             return emptyReportBundle(effectiveFilter, "Authentication required.", "Sign in to view placement reports.");
         }
 
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            List<Student> allStudents = studentDao.findAll(conn);
-            List<Company> allCompanies = companyDao.findAll(conn);
-            List<PlacementDrive> allDrives = driveDao.findAll(conn);
-            List<Skill> allSkills = skillDao.findAllSkills(conn);
-            List<Application> scopedAppsRaw = applicationDao.findAllForUser(conn, actor);
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            List<Student> allStudents = studentDao.findAll(db);
+            List<Company> allCompanies = companyDao.findAll(db);
+            List<PlacementDrive> allDrives = driveDao.findAll(db);
+            List<Skill> allSkills = skillDao.findAllSkills(db);
+            List<Application> scopedAppsRaw = applicationDao.findAllForUser(db, actor);
 
             UserRole role = actor.getRole();
             String scopeNotice;
@@ -452,10 +415,8 @@ public class GovernanceService {
                     }
                 }
             } else if (role == UserRole.FACULTY) {
-                scopeNotice = "Faculty Coordinator Scope: Department-scoped student placement records ("
-                        + String.join(", ", actor.getAuthorizedDepartments().isEmpty()
-                        ? List.of(nonBlank(actor.getDepartment(), "All Assigned Branches"))
-                        : actor.getAuthorizedDepartments()) + ") & institutional drives.";
+                scopeNotice = "Faculty Coordinator Scope: Scoped to your authorized department(s) ("
+                        + String.join(", ", DeptNormalizer.getFacultyAuthorizedDepts(actor.getUsername())) + ").";
                 for (Student s : allStudents) {
                     if (DeptNormalizer.isFacultyAuthorizedForStudent(
                             actor.getAuthorizedDepartments(), actor.getUsername(), s.getBranch())) {
@@ -463,261 +424,255 @@ public class GovernanceService {
                     }
                 }
                 roleCompanies.addAll(allCompanies);
-                roleDrives.addAll(allDrives);
+                for (PlacementDrive d : allDrives) {
+                    if (d.getEligibleBranches() != null && !d.getEligibleBranches().isEmpty()) {
+                        boolean overlaps = false;
+                        for (String eb : d.getEligibleBranches()) {
+                            if (DeptNormalizer.isFacultyAuthorizedForStudent(
+                                    actor.getAuthorizedDepartments(), actor.getUsername(), eb)) {
+                                overlaps = true;
+                                break;
+                            }
+                        }
+                        if (overlaps) roleDrives.add(d);
+                    } else {
+                        roleDrives.add(d);
+                    }
+                }
             } else {
-                scopeNotice = "Institutional Governance Scope (" + role.name() + "): Complete live MySQL records across all GCET departments, companies, drives & applications.";
+                scopeNotice = "Institutional Scope (" + role.name() + "): Full college-wide view across all departments, drives, and recruitment partners.";
                 roleStudents.addAll(allStudents);
                 roleCompanies.addAll(allCompanies);
                 roleDrives.addAll(allDrives);
             }
 
-            // Apply Filters (Academic Year, Graduation Year, Branch, Date Range)
-            LocalDate fromDt = parseDateSafe(effectiveFilter.fromDate());
-            LocalDate toDt = parseDateSafe(effectiveFilter.toDate());
-
+            // Apply filters (Academic Year, Grad Year, Branch)
             List<Student> filteredStudents = new ArrayList<>();
             for (Student s : roleStudents) {
-                if (!matchesAcademicYear(s, effectiveFilter.academicYear())) continue;
-                if (!matchesGraduationYear(s.getGraduationYear(), effectiveFilter.graduationYear())) continue;
-                if (!matchesBranch(s.getBranch(), effectiveFilter.branch())) continue;
-                if (!matchesDateRange(s.getCreatedAt(), fromDt, toDt)) continue;
+                if (!matchesFilter(s, effectiveFilter)) continue;
                 filteredStudents.add(s);
             }
 
-            List<PlacementDrive> filteredDrives = new ArrayList<>();
-            for (PlacementDrive d : roleDrives) {
-                if (!matchesGraduationYear(d.getTargetGraduationYear(), effectiveFilter.graduationYear())) continue;
-                if (!matchesDriveBranch(d, effectiveFilter.branch())) continue;
-                if (!matchesDateRange(d.getDriveDate(), fromDt, toDt)) continue;
-                filteredDrives.add(d);
-            }
-
-            Set<String> filteredDriveIds = new HashSet<>();
-            for (PlacementDrive d : filteredDrives) filteredDriveIds.add(d.getId());
-            Set<String> filteredStudentIds = new HashSet<>();
-            for (Student s : filteredStudents) filteredStudentIds.add(s.getId());
-
-            List<Application> filteredApps = new ArrayList<>();
-            for (Application a : scopedAppsRaw) {
-                if (!"ALL".equalsIgnoreCase(effectiveFilter.branch())
-                        && !matchesBranch(a.getStudentBranch(), effectiveFilter.branch())) {
-                    continue;
-                }
-                if ((fromDt != null || toDt != null) && !matchesDateRange(a.getAppliedAt(), fromDt, toDt)) {
-                    continue;
-                }
-                if ((!"ALL".equalsIgnoreCase(effectiveFilter.academicYear())
-                        || !"ALL".equalsIgnoreCase(effectiveFilter.graduationYear()))
-                        && !filteredStudentIds.isEmpty() && !filteredStudentIds.contains(a.getStudentId())) {
-                    continue;
-                }
-                filteredApps.add(a);
-            }
-
-            // Aggregate Branch Rows
-            // Note: For STUDENT role, compute branch summary across department cohort safely without exposing peers' rows
-            List<Student> branchSource = (role == UserRole.STUDENT)
-                    ? filterStudentsByFilter(allStudents, effectiveFilter, fromDt, toDt)
-                    : filteredStudents;
-
+            // Compute branch report rows
             Map<String, List<Student>> byBranch = new LinkedHashMap<>();
-            for (Student s : branchSource) {
-                String br = nonBlank(s.getBranch(), "Unassigned");
+            for (Student s : (role == UserRole.STUDENT ? allStudents : filteredStudents)) {
+                String br = s.getBranch() != null && !s.getBranch().isBlank() ? s.getBranch() : "CSE";
                 byBranch.computeIfAbsent(br, k -> new ArrayList<>()).add(s);
             }
 
             List<BranchReportRow> branchRows = new ArrayList<>();
             for (Map.Entry<String, List<Student>> entry : byBranch.entrySet()) {
-                List<Student> list = entry.getValue();
-                int total = list.size();
-                int eligible = 0;
-                int placed = 0;
+                String br = entry.getKey();
+                List<Student> bStudents = entry.getValue();
+                int bTotal = bStudents.size();
+                int bEligible = 0;
+                int bPlaced = 0;
                 double cgpaSum = 0;
                 double pkgSum = 0;
+                double highestPkg = 0;
                 int pkgCount = 0;
-                double maxPkg = 0;
 
-                for (Student st : list) {
-                    cgpaSum += st.getCgpa();
-                    if (st.getCgpa() >= 6.0 && st.getBacklogs() == 0) {
-                        eligible++;
-                    }
-                    if ("PLACED".equalsIgnoreCase(st.getPlacementStatus())) {
-                        placed++;
-                        if (st.getPlacedPackageLpa() != null && st.getPlacedPackageLpa() > 0) {
-                            pkgSum += st.getPlacedPackageLpa();
+                for (Student s : bStudents) {
+                    cgpaSum += s.getCgpa();
+                    if (s.getCgpa() >= 6.0 && s.getBacklogs() == 0) bEligible++;
+                    if ("PLACED".equalsIgnoreCase(s.getPlacementStatus())) {
+                        bPlaced++;
+                        if (s.getPlacedPackageLpa() != null && s.getPlacedPackageLpa() > 0) {
+                            pkgSum += s.getPlacedPackageLpa();
                             pkgCount++;
-                            if (st.getPlacedPackageLpa() > maxPkg) maxPkg = st.getPlacedPackageLpa();
+                            if (s.getPlacedPackageLpa() > highestPkg) highestPkg = s.getPlacedPackageLpa();
                         }
                     }
                 }
-                double rate = total > 0 ? (placed * 100.0) / total : 0.0;
-                double avgCgpa = total > 0 ? cgpaSum / total : 0.0;
-                double avgPkg = pkgCount > 0 ? pkgSum / pkgCount : 0.0;
+
+                double bRate = bTotal > 0 ? (bPlaced * 100.0) / bTotal : 0.0;
+                double bAvgCgpa = bTotal > 0 ? cgpaSum / bTotal : 0.0;
+                double bAvgPkg = pkgCount > 0 ? pkgSum / pkgCount : 0.0;
                 branchRows.add(new BranchReportRow(
-                        entry.getKey(), total, eligible, placed, Math.max(0, total - placed),
-                        rate, avgCgpa, avgPkg, maxPkg
+                        br, bTotal, bEligible, bPlaced, Math.max(0, bTotal - bPlaced),
+                        Math.round(bRate * 10.0) / 10.0,
+                        Math.round(bAvgCgpa * 100.0) / 100.0,
+                        Math.round(bAvgPkg * 100.0) / 100.0,
+                        Math.round(highestPkg * 10.0) / 10.0
                 ));
             }
-            branchRows.sort((a, b) -> Integer.compare(b.totalStudents(), a.totalStudents()));
 
-            // Aggregate Company Rows
+            // Company report rows
             List<CompanyReportRow> companyRows = new ArrayList<>();
             for (Company c : roleCompanies) {
-                int drivesCnt = 0;
+                int dCount = 0;
                 double maxPkg = 0;
-                for (PlacementDrive d : filteredDrives) {
-                    if (c.getId().equals(d.getCompanyId())
-                            || (c.getName() != null && c.getName().equalsIgnoreCase(d.getCompanyName()))) {
-                        drivesCnt++;
+                for (PlacementDrive d : roleDrives) {
+                    if (Objects.equals(d.getCompanyId(), c.getId())
+                            || (d.getCompanyName() != null && c.getName() != null && d.getCompanyName().equalsIgnoreCase(c.getName()))) {
+                        dCount++;
                         if (d.getSalaryPackageLpa() > maxPkg) maxPkg = d.getSalaryPackageLpa();
                     }
                 }
-                int appsCnt = 0;
-                int offersCnt = 0;
-                for (Application a : filteredApps) {
-                    boolean match = (c.getId().equals(a.getCompanyId()))
-                            || (c.getName() != null && c.getName().equalsIgnoreCase(a.getCompanyName()));
-                    if (match) {
-                        appsCnt++;
+                int appCount = 0;
+                int offersCount = 0;
+                for (Application a : scopedAppsRaw) {
+                    if (Objects.equals(a.getCompanyId(), c.getId())
+                            || (a.getCompanyName() != null && c.getName() != null && a.getCompanyName().equalsIgnoreCase(c.getName()))) {
+                        appCount++;
                         if (a.getCurrentStage() != null && a.getCurrentStage().isOfferOrSelected()) {
-                            offersCnt++;
-                            if (a.getFinalOfferLpa() != null && a.getFinalOfferLpa() > maxPkg) {
-                                maxPkg = a.getFinalOfferLpa();
-                            }
+                            offersCount++;
                         }
                     }
                 }
                 companyRows.add(new CompanyReportRow(
-                        c.getId(), nonBlank(c.getName(), "-"), nonBlank(c.getIndustry(), "-"),
-                        nonBlank(c.getTier(), "Standard IT"), nonBlank(c.getApprovalStatus(), nonBlank(c.getStatus(), "ACTIVE")),
-                        drivesCnt, appsCnt, offersCnt, maxPkg
+                        c.getId(), c.getName(), c.getIndustry(), c.getTier(), c.getApprovalStatus(),
+                        dCount, appCount, offersCount, maxPkg
                 ));
             }
 
-            // Aggregate Drive Rows
+            // Drive report rows
             List<DriveReportRow> driveRows = new ArrayList<>();
-            for (PlacementDrive d : filteredDrives) {
-                int appsCnt = 0;
-                int selCnt = 0;
-                for (Application a : filteredApps) {
-                    if (d.getId().equals(a.getDriveId())) {
-                        appsCnt++;
+            for (PlacementDrive d : roleDrives) {
+                int applicants = 0;
+                int selected = 0;
+                for (Application a : scopedAppsRaw) {
+                    if (Objects.equals(a.getDriveId(), d.getId())) {
+                        applicants++;
                         if (a.getCurrentStage() != null && a.getCurrentStage().isOfferOrSelected()) {
-                            selCnt++;
+                            selected++;
                         }
                     }
                 }
                 driveRows.add(new DriveReportRow(
-                        d.getId(), nonBlank(d.getCompanyName(), "-"), nonBlank(d.getJobRole(), "-"),
-                        nonBlank(d.getStatus(), "OPEN"), nonBlank(d.getDriveDate(), "-"),
-                        nonBlank(d.getApplicationDeadline(), "-"), d.getMinCgpa(),
-                        d.getMaxBacklogsAllowed(), d.getTargetGraduationYear(),
-                        d.getSalaryPackageLpa(), d.getAvailablePositions(), appsCnt, selCnt
+                        d.getId(), d.getCompanyName(), d.getJobRole(), d.getStatus(),
+                        d.getDriveDate(), d.getApplicationDeadline(),
+                        d.getMinCgpa(), d.getMaxBacklogs(), d.getTargetGradYear(),
+                        d.getSalaryPackageLpa(), d.getPositions(), applicants, selected
                 ));
             }
 
-            // Pipeline Stage Distribution
-            Map<ApplicationStage, Integer> stageCounts = new LinkedHashMap<>();
-            for (ApplicationStage stg : ApplicationStage.values()) {
-                stageCounts.put(stg, 0);
+            // Pipeline rows
+            Map<ApplicationStage, Integer> stageCounts = new EnumMap<>(ApplicationStage.class);
+            for (Application a : scopedAppsRaw) {
+                ApplicationStage st = a.getCurrentStage() != null ? a.getCurrentStage() : ApplicationStage.APPLICATION_SUBMITTED;
+                stageCounts.merge(st, 1, Integer::sum);
             }
-            for (Application a : filteredApps) {
-                ApplicationStage stg = a.getCurrentStage() != null ? a.getCurrentStage() : ApplicationStage.APPLICATION_SUBMITTED;
-                stageCounts.put(stg, stageCounts.getOrDefault(stg, 0) + 1);
-            }
-            int totalApps = filteredApps.size();
+            int totalApps = scopedAppsRaw.size();
             List<PipelineReportRow> pipelineRows = new ArrayList<>();
-            for (Map.Entry<ApplicationStage, Integer> entry : stageCounts.entrySet()) {
-                int cnt = entry.getValue();
-                double pct = totalApps > 0 ? (cnt * 100.0) / totalApps : 0.0;
-                pipelineRows.add(new PipelineReportRow(entry.getKey().name(), entry.getKey().getLabel(), cnt, pct));
+            for (ApplicationStage st : ApplicationStage.values()) {
+                int c = stageCounts.getOrDefault(st, 0);
+                double pct = totalApps > 0 ? (c * 100.0) / totalApps : 0.0;
+                pipelineRows.add(new PipelineReportRow(st.name(), st.getLabel(), c, Math.round(pct * 10.0) / 10.0));
             }
 
-            // Skill Distribution Report (supply across scoped students vs demand across filtered drives)
-            Map<String, Integer> skillSupply = new HashMap<>();
-            Map<String, Integer> skillVerified = new HashMap<>();
-            for (Student st : filteredStudents) {
-                for (StudentSkill ss : st.getSkills()) {
-                    skillSupply.put(ss.getSkillId(), skillSupply.getOrDefault(ss.getSkillId(), 0) + 1);
-                    if (ss.isVerifiedByFaculty()) {
-                        skillVerified.put(ss.getSkillId(), skillVerified.getOrDefault(ss.getSkillId(), 0) + 1);
-                    }
-                }
-            }
-            Map<String, Integer> skillDemand = new HashMap<>();
-            for (PlacementDrive d : filteredDrives) {
-                for (DriveRequiredSkill dr : d.getRequiredSkills()) {
-                    skillDemand.put(dr.getSkillId(), skillDemand.getOrDefault(dr.getSkillId(), 0) + 1);
-                }
-            }
+            // Skill report rows
             List<SkillReportRow> skillRows = new ArrayList<>();
             for (Skill sk : allSkills) {
-                int sup = skillSupply.getOrDefault(sk.getId(), 0);
-                int ver = skillVerified.getOrDefault(sk.getId(), 0);
-                int dem = skillDemand.getOrDefault(sk.getId(), 0);
-                if (sup > 0 || dem > 0) {
-                    skillRows.add(new SkillReportRow(sk.getId(), sk.getName(), sk.getCategory(), sup, ver, dem));
+                int countWithSkill = 0;
+                int verifiedCount = 0;
+                for (Student s : filteredStudents) {
+                    if (s.getSkills() != null) {
+                        for (StudentSkill ss : s.getSkills()) {
+                            if (Objects.equals(ss.getSkillId(), sk.getId())
+                                    || (ss.getSkillName() != null && ss.getSkillName().equalsIgnoreCase(sk.getName()))) {
+                                countWithSkill++;
+                                if (ss.isVerifiedByFaculty()) verifiedCount++;
+                            }
+                        }
+                    }
                 }
+                int driveCount = 0;
+                for (PlacementDrive d : roleDrives) {
+                    if (d.getRequiredSkills() != null) {
+                        for (DriveRequiredSkill drs : d.getRequiredSkills()) {
+                            if (Objects.equals(drs.getSkillId(), sk.getId())
+                                    || (drs.getSkillName() != null && drs.getSkillName().equalsIgnoreCase(sk.getName()))) {
+                                driveCount++;
+                                break;
+                            }
+                        }
+                    }
+                }
+                skillRows.add(new SkillReportRow(sk.getId(), sk.getName(), sk.getCategory(), countWithSkill, verifiedCount, driveCount));
             }
-            skillRows.sort((a, b) -> Integer.compare(
-                    b.studentsWithSkill() + b.drivesRequiringSkill(),
-                    a.studentsWithSkill() + a.drivesRequiringSkill()
-            ));
 
-            // KPI Totals
-            int totalStu = filteredStudents.size();
-            int eligibleStu = 0;
-            int placedStu = 0;
-            double pkgSum = 0;
-            int pkgCount = 0;
+            // Institutional summary KPIs
+            int totalStud = filteredStudents.size();
+            int placedStud = 0;
+            int eligibleStud = 0;
+            double totalPkg = 0;
             double highPkg = 0;
+            int placedPkgCount = 0;
 
             for (Student s : filteredStudents) {
-                if (s.getCgpa() >= 6.0 && s.getBacklogs() == 0) eligibleStu++;
+                if (s.getCgpa() >= 6.0 && s.getBacklogs() == 0) eligibleStud++;
                 if ("PLACED".equalsIgnoreCase(s.getPlacementStatus())) {
-                    placedStu++;
+                    placedStud++;
                     if (s.getPlacedPackageLpa() != null && s.getPlacedPackageLpa() > 0) {
-                        pkgSum += s.getPlacedPackageLpa();
-                        pkgCount++;
+                        totalPkg += s.getPlacedPackageLpa();
+                        placedPkgCount++;
                         if (s.getPlacedPackageLpa() > highPkg) highPkg = s.getPlacedPackageLpa();
                     }
                 }
             }
-            for (PlacementDrive d : filteredDrives) {
-                if (d.getSalaryPackageLpa() > highPkg) highPkg = d.getSalaryPackageLpa();
-            }
 
-            double ratePct = totalStu > 0 ? (placedStu * 100.0) / totalStu : 0.0;
-            double avgPkg = pkgCount > 0 ? pkgSum / pkgCount : 0.0;
+            double rate = totalStud > 0 ? (placedStud * 100.0) / totalStud : 0.0;
+            double avgPkg = placedPkgCount > 0 ? totalPkg / placedPkgCount : 0.0;
 
             return new ReportBundle(
                     effectiveFilter,
                     filteredStudents,
                     roleCompanies,
-                    filteredDrives,
-                    filteredApps,
+                    roleDrives,
+                    scopedAppsRaw,
                     branchRows,
                     companyRows,
                     driveRows,
                     pipelineRows,
                     skillRows,
-                    totalStu,
-                    eligibleStu,
-                    placedStu,
-                    ratePct,
-                    avgPkg,
-                    highPkg,
+                    totalStud,
+                    eligibleStud,
+                    placedStud,
+                    Math.round(rate * 10.0) / 10.0,
+                    Math.round(avgPkg * 100.0) / 100.0,
+                    Math.round(highPkg * 10.0) / 10.0,
                     scopeNotice,
                     null
             );
-        } catch (SQLException ex) {
-            return emptyReportBundle(effectiveFilter, "MySQL query error: " + ex.getMessage(), "");
+        } catch (DatabaseException | MongoException ex) {
+            return emptyReportBundle(effectiveFilter, "Failed to query MongoDB reports: " + ex.getMessage(), ex.getMessage());
         }
     }
 
+    private static boolean matchesFilter(Student s, ReportFilter filter) {
+        if (filter == null) return true;
+        if (!"ALL".equalsIgnoreCase(filter.branch())) {
+            String br = s.getBranch() != null ? s.getBranch().trim() : "";
+            if (!br.equalsIgnoreCase(filter.branch())) return false;
+        }
+        if (!"ALL".equalsIgnoreCase(filter.academicYear())) {
+            try {
+                int yr = Integer.parseInt(filter.academicYear());
+                if (s.getAcademicYear() != yr && s.getYearOfStudy() != yr) return false;
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        if (!"ALL".equalsIgnoreCase(filter.graduationYear())) {
+            try {
+                int gy = Integer.parseInt(filter.graduationYear());
+                if (s.getGraduationYear() != gy) return false;
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return true;
+    }
+
+    private static ReportBundle emptyReportBundle(ReportFilter f, String notice, String err) {
+        return new ReportBundle(
+                f, List.of(), List.of(), List.of(), List.of(),
+                List.of(), List.of(), List.of(), List.of(), List.of(),
+                0, 0, 0, 0.0, 0.0, 0.0, notice, err
+        );
+    }
+
     // -------------------------------------------------------------------------
-    // 3. SETTINGS, PROFILE, PASSWORD & USER MANAGEMENT
+    // 3. SETTINGS & PROFILE MANAGEMENT
     // -------------------------------------------------------------------------
 
     public OperationResult<User> updateMyProfile(
@@ -737,30 +692,22 @@ public class GovernanceService {
             return OperationResult.fail("Full Name and Official Email cannot be empty.");
         }
 
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            if (userDao.existsByEmailExcludingUser(conn, cleanEmail, actor.getId())) {
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            if (userDao.existsByEmailExcludingUser(db, cleanEmail, actor.getId())) {
                 return OperationResult.fail("Another account is already registered with email \"" + cleanEmail + "\".");
             }
-            conn.setAutoCommit(false);
-            try {
-                userDao.updateUserProfile(conn, actor.getId(), cleanName, cleanEmail, phone, department, designation);
-                auditLogDao.insertLog(conn, "PROFILE_UPDATED", actor.getId(), actor.getUsername(), actor.getRole().name(),
-                        "Updated account profile details (Name: " + cleanName + ", Dept: " + nonBlank(department, "-") + ").");
-                User refreshed = userDao.findById(conn, actor.getId());
-                if (refreshed != null) {
-                    refreshed.setPasswordHash(null);
-                    refreshed.setSalt(null);
-                }
-                conn.commit();
-                return OperationResult.ok("Profile updated and saved in MySQL.", refreshed);
-            } catch (SQLException txEx) {
-                conn.rollback();
-                throw txEx;
-            } finally {
-                conn.setAutoCommit(true);
+            userDao.updateUserProfile(db, actor.getId(), cleanName, cleanEmail, phone, department, designation);
+            auditLogDao.insertLog(db, "PROFILE_UPDATED", actor.getId(), actor.getUsername(), actor.getRole().name(),
+                    "Updated account profile details (Name: " + cleanName + ", Dept: " + nonBlank(department, "-") + ").");
+            User refreshed = userDao.findById(db, actor.getId());
+            if (refreshed != null) {
+                refreshed.setPasswordHash(null);
+                refreshed.setSalt(null);
             }
-        } catch (SQLException ex) {
-            return OperationResult.fail("Failed to update profile in MySQL: " + ex.getMessage());
+            return OperationResult.ok("Profile updated and saved in MongoDB.", refreshed);
+        } catch (DatabaseException | MongoException ex) {
+            return OperationResult.fail("Failed to update profile in MongoDB: " + ex.getMessage());
         }
     }
 
@@ -778,30 +725,22 @@ public class GovernanceService {
             return OperationResult.fail("New password must differ from your current password.");
         }
 
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            User dbUser = userDao.findById(conn, actor.getId());
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            User dbUser = userDao.findById(db, actor.getId());
             if (dbUser == null) {
-                return OperationResult.fail("User account not found in MySQL.");
+                return OperationResult.fail("User account not found in MongoDB.");
             }
             if (!PasswordHasher.verifyPassword(currentPassword, dbUser.getSalt(), dbUser.getPasswordHash())) {
                 return OperationResult.fail("Current password verification failed. No changes saved.");
             }
 
             String[] hashed = PasswordHasher.hashWithBCrypt(newPassword);
-            conn.setAutoCommit(false);
-            try {
-                userDao.updatePasswordHash(conn, dbUser.getId(), hashed[0], hashed[1]);
-                auditLogDao.insertLog(conn, "PASSWORD_CHANGED", dbUser.getId(), dbUser.getUsername(), dbUser.getRole().name(),
-                        "User verified current password and updated credentials via BCrypt.");
-                conn.commit();
-                return OperationResult.ok("Password updated securely in MySQL.", null);
-            } catch (SQLException txEx) {
-                conn.rollback();
-                throw txEx;
-            } finally {
-                conn.setAutoCommit(true);
-            }
-        } catch (SQLException ex) {
+            userDao.updatePasswordHash(db, dbUser.getId(), hashed[0], hashed[1]);
+            auditLogDao.insertLog(db, "PASSWORD_CHANGED", dbUser.getId(), dbUser.getUsername(), dbUser.getRole().name(),
+                    "User verified current password and updated credentials via BCrypt.");
+            return OperationResult.ok("Password updated securely in MongoDB.", null);
+        } catch (DatabaseException | MongoException ex) {
             return OperationResult.fail("Failed to update password: " + ex.getMessage());
         }
     }
@@ -811,9 +750,10 @@ public class GovernanceService {
             return OperationResult.fail("Admin Authority Required: Only College Administrators may inspect user accounts.");
         }
         try {
-            return OperationResult.ok("Loaded users from MySQL.", userDao.findAll());
-        } catch (SQLException ex) {
-            return OperationResult.fail("Failed to load user directory from MySQL: " + ex.getMessage());
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            return OperationResult.ok("Loaded users from MongoDB.", userDao.findAll(db));
+        } catch (DatabaseException | MongoException ex) {
+            return OperationResult.fail("Failed to load user directory from MongoDB: " + ex.getMessage());
         }
     }
 
@@ -843,12 +783,12 @@ public class GovernanceService {
             return OperationResult.fail("Only Principal or System Admin may provision Administrative accounts.");
         }
 
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            if (userDao.existsByEmailOrUsername(conn, cleanEmail, cleanUser)) {
-                return OperationResult.fail("An account with that username or email already exists in MySQL.");
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            if (userDao.existsByEmailOrUsername(db, cleanEmail, cleanUser)) {
+                return OperationResult.fail("An account with that username or email already exists in MongoDB.");
             }
             User u = new User();
-            u.setId("usr-" + UUID.randomUUID());
             u.setUsername(cleanUser);
             u.setEmail(cleanEmail);
             u.setFullName(cleanName);
@@ -857,20 +797,11 @@ public class GovernanceService {
             u.setDesignation(designation != null ? designation.trim() : "");
 
             String[] hashed = PasswordHasher.hashWithBCrypt(initialPassword);
-            conn.setAutoCommit(false);
-            try {
-                userDao.createUserAccount(conn, u, hashed[0], hashed[1]);
-                auditLogDao.insertLog(conn, "ADMIN_USER_CREATED", actor.getId(), actor.getUsername(), actor.getRole().name(),
-                        "Created " + targetRole.name() + " user @" + cleanUser + " (" + cleanName + ").");
-                conn.commit();
-                return OperationResult.ok("Created user @" + cleanUser + " in MySQL.", u.getId());
-            } catch (SQLException txEx) {
-                conn.rollback();
-                throw txEx;
-            } finally {
-                conn.setAutoCommit(true);
-            }
-        } catch (SQLException ex) {
+            String id = userDao.createUserAccount(db, u, hashed[0], hashed[1]);
+            auditLogDao.insertLog(db, "ADMIN_USER_CREATED", actor.getId(), actor.getUsername(), actor.getRole().name(),
+                    "Created " + targetRole.name() + " user @" + cleanUser + " (" + cleanName + ").");
+            return OperationResult.ok("Created user @" + cleanUser + " in MongoDB.", id);
+        } catch (DatabaseException | MongoException ex) {
             return OperationResult.fail("Failed to create user account: " + ex.getMessage());
         }
     }
@@ -886,30 +817,22 @@ public class GovernanceService {
             return OperationResult.fail("Safety Guardrail: You cannot delete your own active administrative session account.");
         }
 
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
-            User target = userDao.findById(conn, targetUserId);
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
+            User target = userDao.findById(db, targetUserId);
             if (target == null) {
-                return OperationResult.fail("User account not found in MySQL.");
+                return OperationResult.fail("User account not found in MongoDB.");
             }
-            if (target.getRole() == UserRole.ADMIN && userDao.countActiveAdmins(conn) <= 1) {
+            if (target.getRole() == UserRole.ADMIN && userDao.countActiveAdmins(db) <= 1) {
                 return OperationResult.fail("Safety Guardrail: Cannot delete the last remaining active System Admin account.");
             }
 
-            conn.setAutoCommit(false);
-            try {
-                userDao.deleteUserById(conn, target.getId());
-                auditLogDao.insertLog(conn, "ADMIN_USER_DELETED", actor.getId(), actor.getUsername(), actor.getRole().name(),
-                        "Deleted user @" + target.getUsername() + " (Role: " + target.getRole().name() + ").");
-                conn.commit();
-                return OperationResult.ok("Deleted account @" + target.getUsername() + " from MySQL.", null);
-            } catch (SQLException txEx) {
-                conn.rollback();
-                throw txEx;
-            } finally {
-                conn.setAutoCommit(true);
-            }
-        } catch (SQLException ex) {
-            return OperationResult.fail("Cannot delete user (may be referenced by placement records): " + ex.getMessage());
+            userDao.deleteUserById(db, target.getId());
+            auditLogDao.insertLog(db, "ADMIN_USER_DELETED", actor.getId(), actor.getUsername(), actor.getRole().name(),
+                    "Deleted user @" + target.getUsername() + " (Role: " + target.getRole().name() + ").");
+            return OperationResult.ok("Deleted account @" + target.getUsername() + " from MongoDB.", null);
+        } catch (DatabaseException | MongoException ex) {
+            return OperationResult.fail("Cannot delete user: " + ex.getMessage());
         }
     }
 
@@ -933,15 +856,16 @@ public class GovernanceService {
         boolean fullInstitutional = actor.getRole().isPrivilegedRole();
         String restrictedActorId = fullInstitutional ? null : actor.getId();
 
-        try (Connection conn = DatabaseConnection.getInstance().getConnection()) {
+        try {
+            MongoDatabase db = DatabaseConnection.getInstance().getDatabase();
             List<AuditLog> logs = auditLogDao.findFiltered(
-                    conn, search, actionFilter, roleFilter, fromDate, toDate, restrictedActorId, 400
+                    db, search, actionFilter, roleFilter, fromDate, toDate, restrictedActorId, 400
             );
-            List<String> actions = fullInstitutional ? auditLogDao.findDistinctActions(conn) : List.of();
+            List<String> actions = fullInstitutional ? auditLogDao.findDistinctActions(db) : List.of();
             return new AuditLogBundle(logs, actions, fullInstitutional, null);
-        } catch (SQLException ex) {
+        } catch (DatabaseException | MongoException ex) {
             return new AuditLogBundle(List.of(), List.of(), fullInstitutional,
-                    "Failed to query audit_logs from MySQL: " + ex.getMessage());
+                    "Failed to query audit_logs from MongoDB: " + ex.getMessage());
         }
     }
 
@@ -949,85 +873,11 @@ public class GovernanceService {
         return DatabaseConnection.getInstance().inspectExtendedDiagnostics();
     }
 
-    // -------------------------------------------------------------------------
-    // FILTER HELPERS
-    // -------------------------------------------------------------------------
-
-    private List<Student> filterStudentsByFilter(List<Student> list, ReportFilter f, LocalDate fromDt, LocalDate toDt) {
-        List<Student> out = new ArrayList<>();
-        for (Student s : list) {
-            if (!matchesAcademicYear(s, f.academicYear())) continue;
-            if (!matchesGraduationYear(s.getGraduationYear(), f.graduationYear())) continue;
-            if (!matchesBranch(s.getBranch(), f.branch())) continue;
-            if (!matchesDateRange(s.getCreatedAt(), fromDt, toDt)) continue;
-            out.add(s);
-        }
-        return out;
-    }
-
-    private boolean matchesAcademicYear(Student s, String filterVal) {
-        if (filterVal == null || filterVal.isBlank() || "ALL".equalsIgnoreCase(filterVal)) return true;
-        int yr = s.getAcademicYear() > 0 ? s.getAcademicYear() : s.getYearOfStudy();
-        return filterVal.trim().equals(String.valueOf(yr));
-    }
-
-    private boolean matchesGraduationYear(int gradYear, String filterVal) {
-        if (filterVal == null || filterVal.isBlank() || "ALL".equalsIgnoreCase(filterVal)) return true;
-        return filterVal.trim().equals(String.valueOf(gradYear));
-    }
-
-    private boolean matchesBranch(String branch, String filterBranch) {
-        if (filterBranch == null || filterBranch.isBlank() || "ALL".equalsIgnoreCase(filterBranch)) return true;
-        return DeptNormalizer.normalizeDeptCode(branch)
-                .equalsIgnoreCase(DeptNormalizer.normalizeDeptCode(filterBranch));
-    }
-
-    private boolean matchesDriveBranch(PlacementDrive d, String filterBranch) {
-        if (filterBranch == null || filterBranch.isBlank() || "ALL".equalsIgnoreCase(filterBranch)) return true;
-        if (d.getEligibleBranches() == null || d.getEligibleBranches().isEmpty()) return true;
-        String target = DeptNormalizer.normalizeDeptCode(filterBranch);
-        for (String b : d.getEligibleBranches()) {
-            if (DeptNormalizer.normalizeDeptCode(b).equalsIgnoreCase(target)) return true;
-        }
-        return false;
-    }
-
-    private boolean matchesDateRange(String rawIsoOrDate, LocalDate fromDt, LocalDate toDt) {
-        if (fromDt == null && toDt == null) return true;
-        if (rawIsoOrDate == null || rawIsoOrDate.isBlank()) return true;
-        LocalDate parsed = parseDateSafe(rawIsoOrDate);
-        if (parsed == null) return true;
-        if (fromDt != null && parsed.isBefore(fromDt)) return false;
-        if (toDt != null && parsed.isAfter(toDt)) return false;
-        return true;
-    }
-
-    private LocalDate parseDateSafe(String raw) {
-        if (raw == null || raw.isBlank()) return null;
-        String clean = raw.trim();
-        if (clean.length() >= 10) {
-            clean = clean.substring(0, 10);
-        }
-        try {
-            return LocalDate.parse(clean);
-        } catch (Exception ignored) {
-            return null;
-        }
-    }
-
-    private ReportBundle emptyReportBundle(ReportFilter filter, String err, String scopeNotice) {
-        return new ReportBundle(
-                filter, List.of(), List.of(), List.of(), List.of(),
-                List.of(), List.of(), List.of(), List.of(), List.of(),
-                0, 0, 0, 0.0, 0.0, 0.0, scopeNotice, err
-        );
-    }
-
     private static boolean isBlank(String s) {
         return s == null || s.trim().isEmpty();
     }
 
-    private static String nonBlank(String s, String def) {
-        return (s != null && !s.isBlank()) ? s : def;
+    private static String nonBlank(String val, String fallback) {
+        return (val != null && !val.trim().isEmpty()) ? val.trim() : fallback;
     }
 }

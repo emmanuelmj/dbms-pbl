@@ -10,6 +10,7 @@ import edu.gcet.placementhub.models.UserRole;
 import edu.gcet.placementhub.ui.audit.AuditLogsPanel;
 import edu.gcet.placementhub.ui.diagnostics.DatabaseDiagnosticsPanel;
 import edu.gcet.placementhub.utils.UiComponents.*;
+import static edu.gcet.placementhub.utils.UiComponents.*;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;

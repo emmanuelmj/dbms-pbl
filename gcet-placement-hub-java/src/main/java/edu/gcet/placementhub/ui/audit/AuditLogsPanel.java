@@ -8,6 +8,7 @@ import edu.gcet.placementhub.models.User;
 import edu.gcet.placementhub.services.GovernanceService.AuditLogBundle;
 import edu.gcet.placementhub.utils.ReportExporter;
 import edu.gcet.placementhub.utils.UiComponents.*;
+import static edu.gcet.placementhub.utils.UiComponents.*;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;

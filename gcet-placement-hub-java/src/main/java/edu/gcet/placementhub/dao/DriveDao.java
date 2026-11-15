@@ -1,331 +1,178 @@
 package edu.gcet.placementhub.dao;
 
+import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoDatabase;
+import com.mongodb.client.model.Filters;
+import com.mongodb.client.model.Sorts;
+import com.mongodb.client.model.Updates;
 import edu.gcet.placementhub.models.DriveRequiredSkill;
 import edu.gcet.placementhub.models.PlacementDrive;
+import org.bson.Document;
 
-import java.sql.*;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static edu.gcet.placementhub.database.BsonUtil.*;
+
 /**
- * JDBC Data Access Object for `placement_drives`, `drive_eligible_branches`, and `drive_required_skills`.
+ * Data Access Object for the {@code placement_drives} collection.
+ *
+ * <pre>
+ * { _id, companyId: ObjectId (-> companies), companyName, companyTier   // denormalized for 1-query reads
+ *   jobRole, jobDescription, salaryPackageLpa,
+ *   eligibilityCriteria: { minCgpa, allowedBranches: [], maxBacklogs, targetGraduationYear },
+ *   requiredSkills: [ { skillId, skillName, minProficiency, mandatory } ],
+ *   driveDate, applicationDeadline, availablePositions, status, selectionProcess, createdAt }
+ * </pre>
+ * The former {@code drive_eligible_branches} and {@code drive_required_skills} join tables are
+ * embedded arrays; the drives list page is now a single find() instead of three joins.
  */
 public class DriveDao {
 
-    public List<PlacementDrive> findAll(Connection conn) throws SQLException {
-        List<PlacementDrive> drives = new ArrayList<>();
-        String sql = "SELECT * FROM placement_drives ORDER BY drive_date ASC, created_at DESC";
-        try (PreparedStatement ps = conn.prepareStatement(sql);
-             ResultSet rs = ps.executeQuery()) {
-            while (rs.next()) {
-                drives.add(mapDrive(rs));
-            }
-        }
+    public static final String COLLECTION = "placement_drives";
 
-        if (!drives.isEmpty()) {
-            Map<String, List<String>> branchMap = loadEligibleBranches(conn);
-            Map<String, List<DriveRequiredSkill>> reqSkillMap = loadRequiredSkills(conn);
-            for (PlacementDrive d : drives) {
-                List<String> branches = branchMap.get(d.getId());
-                if (branches != null) d.setEligibleBranches(branches);
-                List<DriveRequiredSkill> reqs = reqSkillMap.get(d.getId());
-                if (reqs != null) d.setRequiredSkills(reqs);
-            }
+    public static MongoCollection<Document> col(MongoDatabase db) {
+        return db.getCollection(COLLECTION);
+    }
+
+    public List<PlacementDrive> findAll(MongoDatabase db) {
+        List<PlacementDrive> drives = new ArrayList<>();
+        for (Document d : col(db).find().sort(Sorts.orderBy(Sorts.ascending("driveDate"), Sorts.descending("createdAt")))) {
+            drives.add(mapDrive(d));
         }
         return drives;
     }
 
-    public PlacementDrive findById(Connection conn, String driveId) throws SQLException {
+    public PlacementDrive findById(MongoDatabase db, String driveId) {
         if (driveId == null || driveId.isBlank()) return null;
-        PlacementDrive drive = null;
-        String sql = "SELECT * FROM placement_drives WHERE id = ? LIMIT 1";
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, driveId.trim());
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    drive = mapDrive(rs);
-                }
-            }
-        }
-        if (drive != null) {
-            drive.setEligibleBranches(loadBranchesForDrive(conn, drive.getId()));
-            drive.setRequiredSkills(loadSkillsForDrive(conn, drive.getId()));
-        }
-        return drive;
+        Document d = col(db).find(idFilter(driveId.trim())).first();
+        return d == null ? null : mapDrive(d);
     }
 
-    public void insertDrive(Connection conn, PlacementDrive d) throws SQLException {
-        String sql = """
-                INSERT INTO placement_drives (
-                  id, company_id, company_name, job_role, job_description, salary_package_lpa,
-                  min_cgpa, max_backlogs_allowed, target_graduation_year, drive_date,
-                  application_deadline, available_positions, status, selection_process
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """;
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, d.getId());
-            ps.setString(2, d.getCompanyId());
-            ps.setString(3, d.getCompanyName());
-            ps.setString(4, d.getJobRole());
-            ps.setString(5, d.getJobDescription() != null ? d.getJobDescription() : "");
-            ps.setDouble(6, d.getSalaryPackageLpa());
-            ps.setDouble(7, d.getMinCgpa());
-            ps.setInt(8, d.getMaxBacklogsAllowed());
-            ps.setInt(9, d.getTargetGraduationYear() > 0 ? d.getTargetGraduationYear() : 2026);
-            ps.setDate(10, parseSqlDate(d.getDriveDate()));
-            ps.setDate(11, parseSqlDate(d.getApplicationDeadline()));
-            ps.setInt(12, Math.max(1, d.getAvailablePositions()));
-            ps.setString(13, d.getStatus() != null && !d.getStatus().isBlank() ? d.getStatus() : "OPEN");
-            ps.setString(14, d.getSelectionProcess() != null && !d.getSelectionProcess().isBlank()
-                    ? d.getSelectionProcess()
-                    : "Online Assessment -> Technical Interview -> HR");
-            ps.executeUpdate();
-        }
-
-        replaceBranches(conn, d.getId(), d.getEligibleBranches());
-        replaceRequiredSkills(conn, d.getId(), d.getRequiredSkills());
-
-        try (PreparedStatement ps = conn.prepareStatement(
-                "UPDATE companies SET total_drives_conducted = COALESCE(total_drives_conducted, 0) + 1 WHERE id = ?")) {
-            ps.setString(1, d.getCompanyId());
-            ps.executeUpdate();
-        }
-    }
-
-    public void updateDrive(Connection conn, PlacementDrive d) throws SQLException {
-        String sql = """
-                UPDATE placement_drives SET
-                  company_id = ?, company_name = ?, job_role = ?, job_description = ?,
-                  salary_package_lpa = ?, min_cgpa = ?, max_backlogs_allowed = ?,
-                  target_graduation_year = ?, drive_date = ?, application_deadline = ?,
-                  available_positions = ?, status = ?, selection_process = ?
-                WHERE id = ?
-                """;
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, d.getCompanyId());
-            ps.setString(2, d.getCompanyName());
-            ps.setString(3, d.getJobRole());
-            ps.setString(4, d.getJobDescription() != null ? d.getJobDescription() : "");
-            ps.setDouble(5, d.getSalaryPackageLpa());
-            ps.setDouble(6, d.getMinCgpa());
-            ps.setInt(7, d.getMaxBacklogsAllowed());
-            ps.setInt(8, d.getTargetGraduationYear() > 0 ? d.getTargetGraduationYear() : 2026);
-            ps.setDate(9, parseSqlDate(d.getDriveDate()));
-            ps.setDate(10, parseSqlDate(d.getApplicationDeadline()));
-            ps.setInt(11, Math.max(1, d.getAvailablePositions()));
-            ps.setString(12, d.getStatus() != null && !d.getStatus().isBlank() ? d.getStatus() : "OPEN");
-            ps.setString(13, d.getSelectionProcess() != null ? d.getSelectionProcess() : "");
-            ps.setString(14, d.getId());
-            ps.executeUpdate();
-        }
-
-        replaceBranches(conn, d.getId(), d.getEligibleBranches());
-        replaceRequiredSkills(conn, d.getId(), d.getRequiredSkills());
-    }
-
-    public int countApplicationsForDrive(Connection conn, String driveId) throws SQLException {
-        String sql = "SELECT COUNT(*) FROM applications WHERE drive_id = ?";
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, driveId);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? rs.getInt(1) : 0;
-            }
-        }
-    }
-
-    public void deleteDriveCascade(Connection conn, String driveId) throws SQLException {
-        try (PreparedStatement ps = conn.prepareStatement("DELETE FROM drive_eligible_branches WHERE drive_id = ?")) {
-            ps.setString(1, driveId);
-            ps.executeUpdate();
-        }
-        try (PreparedStatement ps = conn.prepareStatement("DELETE FROM drive_required_skills WHERE drive_id = ?")) {
-            ps.setString(1, driveId);
-            ps.executeUpdate();
-        }
-        try (PreparedStatement ps = conn.prepareStatement("DELETE FROM placement_drives WHERE id = ?")) {
-            ps.setString(1, driveId);
-            ps.executeUpdate();
-        }
-    }
-
-    private void replaceBranches(Connection conn, String driveId, List<String> branches) throws SQLException {
-        try (PreparedStatement del = conn.prepareStatement("DELETE FROM drive_eligible_branches WHERE drive_id = ?")) {
-            del.setString(1, driveId);
-            del.executeUpdate();
-        }
-        if (branches == null || branches.isEmpty()) return;
-        try (PreparedStatement ins = conn.prepareStatement(
-                "INSERT IGNORE INTO drive_eligible_branches (drive_id, branch) VALUES (?, ?)")) {
-            for (String branch : branches) {
-                if (branch != null && !branch.isBlank()) {
-                    ins.setString(1, driveId);
-                    ins.setString(2, branch.trim());
-                    ins.addBatch();
-                }
-            }
-            ins.executeBatch();
-        }
-    }
-
-    private void replaceRequiredSkills(Connection conn, String driveId, List<DriveRequiredSkill> reqSkills) throws SQLException {
-        try (PreparedStatement del = conn.prepareStatement("DELETE FROM drive_required_skills WHERE drive_id = ?")) {
-            del.setString(1, driveId);
-            del.executeUpdate();
-        }
-        if (reqSkills == null || reqSkills.isEmpty()) return;
-        try (PreparedStatement ins = conn.prepareStatement(
-                "INSERT IGNORE INTO drive_required_skills (drive_id, skill_id, min_proficiency, is_mandatory) VALUES (?, ?, ?, ?)")) {
-            for (DriveRequiredSkill r : reqSkills) {
-                if (r != null && r.getSkillId() != null && !r.getSkillId().isBlank()) {
-                    ins.setString(1, driveId);
-                    ins.setString(2, r.getSkillId().trim());
-                    ins.setInt(3, Math.max(1, Math.min(5, r.getMinProficiency())));
-                    ins.setBoolean(4, r.isMandatory());
-                    ins.addBatch();
-                }
-            }
-            ins.executeBatch();
-        }
-    }
-
-    private List<String> loadBranchesForDrive(Connection conn, String driveId) throws SQLException {
-        List<String> branches = new ArrayList<>();
-        try (PreparedStatement ps = conn.prepareStatement("SELECT branch FROM drive_eligible_branches WHERE drive_id = ?")) {
-            ps.setString(1, driveId);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    branches.add(rs.getString("branch"));
-                }
-            }
-        }
-        return branches;
-    }
-
-    private List<DriveRequiredSkill> loadSkillsForDrive(Connection conn, String driveId) throws SQLException {
-        List<DriveRequiredSkill> list = new ArrayList<>();
-        try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT skill_id, min_proficiency, is_mandatory FROM drive_required_skills WHERE drive_id = ?")) {
-            ps.setString(1, driveId);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    list.add(new DriveRequiredSkill(
-                            rs.getString("skill_id"),
-                            rs.getInt("min_proficiency"),
-                            rs.getBoolean("is_mandatory")
-                    ));
-                }
-            }
+    /** Full-text search over jobRole / companyName / jobDescription (text index). */
+    public List<PlacementDrive> searchText(MongoDatabase db, String query) {
+        List<PlacementDrive> list = new ArrayList<>();
+        if (query == null || query.isBlank()) return findAll(db);
+        for (Document d : col(db).find(Filters.text(query.trim()))) {
+            list.add(mapDrive(d));
         }
         return list;
     }
 
-    private static Date parseSqlDate(String value) {
-        if (value == null || value.isBlank()) {
-            return Date.valueOf(java.time.LocalDate.now());
-        }
-        try {
-            String trimmed = value.trim();
-            if (trimmed.length() >= 10) trimmed = trimmed.substring(0, 10);
-            return Date.valueOf(trimmed);
-        } catch (IllegalArgumentException ex) {
-            return Date.valueOf(java.time.LocalDate.now());
-        }
+    public String insertDrive(MongoDatabase db, PlacementDrive d) {
+        enrichDenormalizedFields(db, d);
+        Document doc = toDocument(d);
+        col(db).insertOne(doc);
+        d.setId(id(doc));
+        db.getCollection(CompanyDao.COLLECTION).updateOne(idFilter(d.getCompanyId()), Updates.inc("totalDrivesConducted", 1));
+        return d.getId();
     }
 
-    private Map<String, List<String>> loadEligibleBranches(Connection conn) {
-        Map<String, List<String>> map = new HashMap<>();
-        String sql = "SELECT drive_id, branch FROM drive_eligible_branches";
-        try (PreparedStatement ps = conn.prepareStatement(sql);
-             ResultSet rs = ps.executeQuery()) {
-            while (rs.next()) {
-                String driveId = rs.getString("drive_id");
-                String branch = rs.getString("branch");
-                if (driveId != null && branch != null) {
-                    map.computeIfAbsent(driveId, k -> new ArrayList<>()).add(branch);
-                }
+    public void updateDrive(MongoDatabase db, PlacementDrive d) {
+        enrichDenormalizedFields(db, d);
+        Document doc = toDocument(d);
+        doc.remove("_id");
+        doc.remove("createdAt");
+        col(db).updateOne(idFilter(d.getId()), new Document("$set", doc));
+    }
+
+    public int countApplicationsForDrive(MongoDatabase db, String driveId) {
+        return (int) db.getCollection(ApplicationDao.COLLECTION).countDocuments(refFilter("driveId", driveId));
+    }
+
+    /** Embedded branches and required skills vanish together with the drive document. */
+    public void deleteDriveCascade(MongoDatabase db, String driveId) {
+        col(db).deleteOne(idFilter(driveId));
+    }
+
+    public long count(MongoDatabase db) {
+        return col(db).countDocuments();
+    }
+
+    /** Copies companyTier and skillName values into the document (extended-reference pattern). */
+    private void enrichDenormalizedFields(MongoDatabase db, PlacementDrive d) {
+        Document company = db.getCollection(CompanyDao.COLLECTION).find(idFilter(d.getCompanyId())).first();
+        if (company != null) {
+            if (d.getCompanyName() == null || d.getCompanyName().isBlank()) d.setCompanyName(str(company, "name"));
+            d.setCompanyTier(str(company, "tier", "Standard IT"));
+        }
+        Map<String, String> skillNames = new HashMap<>();
+        for (Document sk : db.getCollection(SkillDao.COLLECTION).find().projection(new Document("name", 1))) {
+            skillNames.put(id(sk), str(sk, "name"));
+        }
+        for (DriveRequiredSkill r : d.getRequiredSkills()) {
+            if (r != null && r.getSkillId() != null && (r.getSkillName() == null || r.getSkillName().isBlank())) {
+                r.setSkillName(skillNames.getOrDefault(r.getSkillId(), r.getSkillId()));
             }
-        } catch (SQLException ignored) {
         }
-        return map;
     }
 
-    private Map<String, List<DriveRequiredSkill>> loadRequiredSkills(Connection conn) {
-        Map<String, List<DriveRequiredSkill>> map = new HashMap<>();
-        String sql = "SELECT drive_id, skill_id, min_proficiency, is_mandatory FROM drive_required_skills";
-        try (PreparedStatement ps = conn.prepareStatement(sql);
-             ResultSet rs = ps.executeQuery()) {
-            while (rs.next()) {
-                String driveId = rs.getString("drive_id");
-                if (driveId != null) {
-                    DriveRequiredSkill r = new DriveRequiredSkill(
-                            rs.getString("skill_id"),
-                            rs.getInt("min_proficiency"),
-                            rs.getBoolean("is_mandatory")
-                    );
-                    map.computeIfAbsent(driveId, k -> new ArrayList<>()).add(r);
-                }
-            }
-        } catch (SQLException ignored) {
+    // ------------------------------------------------------------------ mapping
+
+    public static PlacementDrive mapDrive(Document d) {
+        PlacementDrive pd = new PlacementDrive();
+        pd.setId(id(d));
+        pd.setCompanyId(ref(d, "companyId"));
+        pd.setCompanyName(str(d, "companyName"));
+        pd.setCompanyTier(str(d, "companyTier"));
+        pd.setJobRole(str(d, "jobRole"));
+        pd.setJobDescription(str(d, "jobDescription"));
+        pd.setSalaryPackageLpa(dbl(d, "salaryPackageLpa", 0));
+        Document ec = sub(d, "eligibilityCriteria");
+        pd.setMinCgpa(dbl(ec, "minCgpa", 6.0));
+        pd.setMaxBacklogsAllowed(intVal(ec, "maxBacklogs", 0));
+        pd.setTargetGraduationYear(intVal(ec, "targetGraduationYear", 2026));
+        pd.setEligibleBranches(strList(ec, "allowedBranches"));
+        List<DriveRequiredSkill> reqs = new ArrayList<>();
+        for (Document r : docList(d, "requiredSkills")) {
+            DriveRequiredSkill rs = new DriveRequiredSkill(ref(r, "skillId"), intVal(r, "minProficiency", 3), bool(r, "mandatory", false));
+            rs.setSkillName(str(r, "skillName"));
+            reqs.add(rs);
         }
-        return map;
+        pd.setRequiredSkills(reqs);
+        pd.setDriveDate(isoDate(d, "driveDate"));
+        pd.setApplicationDeadline(isoDate(d, "applicationDeadline"));
+        pd.setAvailablePositions(intVal(d, "availablePositions", 1));
+        pd.setStatus(str(d, "status", "OPEN"));
+        pd.setSelectionProcess(str(d, "selectionProcess"));
+        pd.setCreatedAt(iso(d, "createdAt"));
+        return pd;
     }
 
-    private PlacementDrive mapDrive(ResultSet rs) throws SQLException {
-        PlacementDrive d = new PlacementDrive();
-        d.setId(rs.getString("id"));
-        d.setCompanyId(rs.getString("company_id"));
-        d.setCompanyName(rs.getString("company_name"));
-        d.setJobRole(rs.getString("job_role"));
-        d.setJobDescription(safeString(rs, "job_description"));
-        d.setSalaryPackageLpa(safeDouble(rs, "salary_package_lpa", 0));
-        d.setMinCgpa(safeDouble(rs, "min_cgpa", 6.0));
-        d.setMaxBacklogsAllowed(safeInt(rs, "max_backlogs_allowed", 0));
-        d.setTargetGraduationYear(safeInt(rs, "target_graduation_year", 2026));
-        Date dd = safeDate(rs, "drive_date");
-        d.setDriveDate(dd != null ? dd.toString() : safeString(rs, "drive_date"));
-        Date ad = safeDate(rs, "application_deadline");
-        d.setApplicationDeadline(ad != null ? ad.toString() : safeString(rs, "application_deadline"));
-        d.setAvailablePositions(safeInt(rs, "available_positions", 1));
-        String status = safeString(rs, "status");
-        d.setStatus(status != null && !status.isBlank() ? status : "OPEN");
-        d.setSelectionProcess(safeString(rs, "selection_process"));
-        Timestamp createdAt = safeTimestamp(rs, "created_at");
-        if (createdAt != null) d.setCreatedAt(createdAt.toInstant().toString());
-        return d;
-    }
-
-    private static boolean hasColumn(ResultSet rs, String column) {
-        try {
-            ResultSetMetaData meta = rs.getMetaData();
-            for (int i = 1; i <= meta.getColumnCount(); i++) {
-                if (column.equalsIgnoreCase(meta.getColumnLabel(i))) return true;
-            }
-        } catch (SQLException ignored) {
+    public static Document toDocument(PlacementDrive d) {
+        Document doc = new Document();
+        if (d.getId() != null && !d.getId().isBlank()) doc.append("_id", toKey(d.getId()));
+        List<String> branches = new ArrayList<>();
+        for (String b : d.getEligibleBranches()) {
+            if (b != null && !b.isBlank()) branches.add(b.trim());
         }
-        return false;
-    }
-
-    private static String safeString(ResultSet rs, String col) throws SQLException {
-        return hasColumn(rs, col) ? rs.getString(col) : null;
-    }
-
-    private static int safeInt(ResultSet rs, String col, int def) throws SQLException {
-        return hasColumn(rs, col) ? rs.getInt(col) : def;
-    }
-
-    private static double safeDouble(ResultSet rs, String col, double def) throws SQLException {
-        if (!hasColumn(rs, col)) return def;
-        Object obj = rs.getObject(col);
-        return obj == null ? def : ((Number) obj).doubleValue();
-    }
-
-    private static Date safeDate(ResultSet rs, String col) throws SQLException {
-        return hasColumn(rs, col) ? rs.getDate(col) : null;
-    }
-
-    private static Timestamp safeTimestamp(ResultSet rs, String col) throws SQLException {
-        return hasColumn(rs, col) ? rs.getTimestamp(col) : null;
+        List<Document> reqs = new ArrayList<>();
+        for (DriveRequiredSkill r : d.getRequiredSkills()) {
+            if (r == null || r.getSkillId() == null || r.getSkillId().isBlank()) continue;
+            reqs.add(new Document("skillId", toKey(r.getSkillId().trim()))
+                    .append("skillName", r.getSkillName())
+                    .append("minProficiency", Math.max(1, Math.min(5, r.getMinProficiency())))
+                    .append("mandatory", r.isMandatory()));
+        }
+        return doc.append("companyId", toKey(d.getCompanyId()))
+                .append("companyName", d.getCompanyName())
+                .append("companyTier", nvl(d.getCompanyTier(), "Standard IT"))
+                .append("jobRole", d.getJobRole())
+                .append("jobDescription", nvl(d.getJobDescription(), ""))
+                .append("salaryPackageLpa", d.getSalaryPackageLpa())
+                .append("eligibilityCriteria", new Document("minCgpa", d.getMinCgpa())
+                        .append("allowedBranches", branches)
+                        .append("maxBacklogs", d.getMaxBacklogsAllowed())
+                        .append("targetGraduationYear", d.getTargetGraduationYear() > 0 ? d.getTargetGraduationYear() : 2026))
+                .append("requiredSkills", reqs)
+                .append("driveDate", toDateOrToday(d.getDriveDate()))
+                .append("applicationDeadline", toDateOrToday(d.getApplicationDeadline()))
+                .append("availablePositions", Math.max(1, d.getAvailablePositions()))
+                .append("status", nvl(d.getStatus(), "OPEN"))
+                .append("selectionProcess", nvl(d.getSelectionProcess(), "Online Assessment -> Technical Interview -> HR"))
+                .append("createdAt", d.getCreatedAt() != null ? toDateOrToday(d.getCreatedAt()) : now())
+                .append("updatedAt", now());
     }
 }

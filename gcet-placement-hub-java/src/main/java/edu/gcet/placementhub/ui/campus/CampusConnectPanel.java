@@ -6,6 +6,7 @@ import edu.gcet.placementhub.models.GctcAnnouncement;
 import edu.gcet.placementhub.services.CampusConnectService;
 import edu.gcet.placementhub.utils.ResourceLoader;
 import edu.gcet.placementhub.utils.UiComponents.*;
+import static edu.gcet.placementhub.utils.UiComponents.*;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;

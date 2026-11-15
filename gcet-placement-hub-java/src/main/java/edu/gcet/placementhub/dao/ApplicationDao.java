@@ -1,153 +1,135 @@
 package edu.gcet.placementhub.dao;
 
+import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoDatabase;
+import com.mongodb.client.model.Aggregates;
+import com.mongodb.client.model.Filters;
+import com.mongodb.client.model.Sorts;
+import com.mongodb.client.model.Updates;
 import edu.gcet.placementhub.models.Application;
 import edu.gcet.placementhub.models.ApplicationStage;
 import edu.gcet.placementhub.models.StageHistoryEntry;
 import edu.gcet.placementhub.models.User;
 import edu.gcet.placementhub.models.UserRole;
+import org.bson.Document;
+import org.bson.conversions.Bson;
 
-import java.sql.*;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
+
+import static edu.gcet.placementhub.database.BsonUtil.*;
 
 /**
- * JDBC Data Access Object for `applications` and `application_stage_history`.
+ * Data Access Object for the {@code applications} collection.
+ *
+ * <pre>
+ * { _id, studentId: ObjectId (-> students), driveId: ObjectId (-> placement_drives), companyId: ObjectId,
+ *   companyName, jobRole,
+ *   studentSnapshot: { rollNumber, fullName, branch, cgpa },          // extended reference
+ *   currentStage, appliedAt, finalOfferLpa, rejectionReason,
+ *   stageHistory: [ { stage, updatedBy, timestamp, remarks } ]          // immutable workflow trail
+ * }
+ * </pre>
+ * Moving an application to the next stage is now ONE atomic document update ($set + $push) instead
+ * of an UPDATE plus an INSERT into {@code application_stage_history} wrapped in a SQL transaction.
+ * Reads use a {@code $lookup} to refresh the student snapshot (name / branch / CGPA may change).
  */
 public class ApplicationDao {
 
-    public List<Application> findAllForUser(Connection conn, User user) throws SQLException {
-        List<Application> apps = new ArrayList<>();
-        StringBuilder sql = new StringBuilder(
-                "SELECT a.*, "
-                        + "s.roll_number AS student_roll_number, "
-                        + "s.full_name AS student_name, "
-                        + "s.branch AS student_branch, "
-                        + "s.cgpa AS student_cgpa, "
-                        + "d.company_id AS company_id "
-                        + "FROM applications a "
-                        + "JOIN students s ON s.id = a.student_id "
-                        + "LEFT JOIN placement_drives d ON d.id = a.drive_id "
-        );
+    public static final String COLLECTION = "applications";
 
-        String param = null;
+    public static MongoCollection<Document> col(MongoDatabase db) {
+        return db.getCollection(COLLECTION);
+    }
+
+    /** Aggregation: role-scoped $match -> $lookup students -> $sort appliedAt desc. */
+    public static List<Bson> scopedPipeline(User user) {
+        List<Bson> pipeline = new ArrayList<>();
+        Bson match = scopeFilter(user);
+        if (match != null) pipeline.add(Aggregates.match(match));
+        pipeline.add(Aggregates.lookup(StudentDao.COLLECTION, "studentId", "_id", "student"));
+        pipeline.add(Aggregates.unwind("$student", new com.mongodb.client.model.UnwindOptions().preserveNullAndEmptyArrays(true)));
+        pipeline.add(Aggregates.sort(Sorts.descending("appliedAt")));
+        return pipeline;
+    }
+
+    private static Bson scopeFilter(User user) {
         if (user != null && user.getRole() == UserRole.STUDENT && user.getStudentRollNumber() != null && !user.getStudentRollNumber().isBlank()) {
-            sql.append("WHERE LOWER(s.roll_number) = LOWER(?) ");
-            param = user.getStudentRollNumber().trim();
-        } else if (user != null && user.getRole() == UserRole.COMPANY && user.getCompanyId() != null && !user.getCompanyId().isBlank()) {
-            sql.append("WHERE d.company_id = ? ");
-            param = user.getCompanyId().trim();
+            return Filters.regex("studentSnapshot.rollNumber", "^" + java.util.regex.Pattern.quote(user.getStudentRollNumber().trim()) + "$", "i");
         }
-        sql.append("ORDER BY a.applied_at DESC");
-
-        try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
-            if (param != null) {
-                ps.setString(1, param);
-            }
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    apps.add(mapApplication(rs));
-                }
-            }
+        if (user != null && user.getRole() == UserRole.COMPANY && user.getCompanyId() != null && !user.getCompanyId().isBlank()) {
+            return refFilter("companyId", user.getCompanyId().trim());
         }
+        return null;
+    }
 
-        if (!apps.isEmpty()) {
-            Map<String, List<StageHistoryEntry>> histMap = loadStageHistory(conn);
-            for (Application a : apps) {
-                List<StageHistoryEntry> entries = histMap.get(a.getId());
-                if (entries != null) a.setStageHistory(entries);
-            }
+    public List<Application> findAllForUser(MongoDatabase db, User user) {
+        List<Application> apps = new ArrayList<>();
+        for (Document d : col(db).aggregate(scopedPipeline(user))) {
+            apps.add(mapApplication(d));
         }
         return apps;
     }
 
-    public Application findById(Connection conn, String appId) throws SQLException {
+    public Application findById(MongoDatabase db, String appId) {
         if (appId == null || appId.isBlank()) return null;
-        String sql = """
-                SELECT a.*,
-                  s.roll_number AS student_roll_number,
-                  s.full_name AS student_name,
-                  s.branch AS student_branch,
-                  s.cgpa AS student_cgpa,
-                  d.company_id AS company_id
-                FROM applications a
-                JOIN students s ON s.id = a.student_id
-                LEFT JOIN placement_drives d ON d.id = a.drive_id
-                WHERE a.id = ? LIMIT 1
-                """;
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, appId.trim());
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    Application a = mapApplication(rs);
-                    a.setStageHistory(loadHistoryForApp(conn, a.getId()));
-                    return a;
-                }
-            }
-        }
-        return null;
+        List<Bson> pipeline = new ArrayList<>();
+        pipeline.add(Aggregates.match(idFilter(appId.trim())));
+        pipeline.add(Aggregates.lookup(StudentDao.COLLECTION, "studentId", "_id", "student"));
+        pipeline.add(Aggregates.unwind("$student", new com.mongodb.client.model.UnwindOptions().preserveNullAndEmptyArrays(true)));
+        Document d = col(db).aggregate(pipeline).first();
+        return d == null ? null : mapApplication(d);
     }
 
-    public Application findByStudentAndDrive(Connection conn, String studentId, String driveId) throws SQLException {
-        String sql = """
-                SELECT a.*,
-                  s.roll_number AS student_roll_number,
-                  s.full_name AS student_name,
-                  s.branch AS student_branch,
-                  s.cgpa AS student_cgpa,
-                  d.company_id AS company_id
-                FROM applications a
-                JOIN students s ON s.id = a.student_id
-                LEFT JOIN placement_drives d ON d.id = a.drive_id
-                WHERE a.student_id = ? AND a.drive_id = ? LIMIT 1
-                """;
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, studentId);
-            ps.setString(2, driveId);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    return mapApplication(rs);
-                }
-            }
-        }
-        return null;
+    public Application findByStudentAndDrive(MongoDatabase db, String studentId, String driveId) {
+        Document d = col(db).find(Filters.and(refFilter("studentId", studentId), refFilter("driveId", driveId))).first();
+        return d == null ? null : mapApplication(d);
     }
 
-    public void insertApplicationWithHistory(
-            Connection conn,
+    public String insertApplicationWithHistory(
+            MongoDatabase db,
             String appId,
             String driveId,
             String studentId,
             String companyName,
             String jobRole,
             String actorFullName
-    ) throws SQLException {
-        try (PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO applications (id, drive_id, student_id, company_name, job_role, current_stage, applied_at) VALUES (?, ?, ?, ?, ?, 'APPLICATION_SUBMITTED', NOW())")) {
-            ps.setString(1, appId);
-            ps.setString(2, driveId);
-            ps.setString(3, studentId);
-            ps.setString(4, companyName);
-            ps.setString(5, jobRole);
-            ps.executeUpdate();
-        }
-        insertStageHistory(conn, appId, ApplicationStage.APPLICATION_SUBMITTED, actorFullName,
-                "Application submitted via GCET Placement Hub");
+    ) {
+        Document student = db.getCollection(StudentDao.COLLECTION).find(idFilter(studentId)).first();
+        Document drive = db.getCollection(DriveDao.COLLECTION).find(idFilter(driveId)).first();
+        Document doc = new Document();
+        if (appId != null && !appId.isBlank()) doc.append("_id", toKey(appId));
+        doc.append("studentId", toKey(studentId))
+                .append("driveId", toKey(driveId))
+                .append("companyId", drive != null ? drive.get("companyId") : null)
+                .append("companyName", companyName)
+                .append("jobRole", jobRole)
+                .append("studentSnapshot", snapshotOf(student))
+                .append("currentStage", ApplicationStage.APPLICATION_SUBMITTED.name())
+                .append("appliedAt", now())
+                .append("finalOfferLpa", null)
+                .append("rejectionReason", null)
+                .append("stageHistory", List.of(historyEntry(ApplicationStage.APPLICATION_SUBMITTED, actorFullName,
+                        "Application submitted via GCET Placement Hub")));
+        col(db).insertOne(doc);
+        return id(doc);
     }
 
-    public void reapplyWithdrawnApplication(Connection conn, String appId, String actorFullName) throws SQLException {
-        try (PreparedStatement ps = conn.prepareStatement(
-                "UPDATE applications SET current_stage = 'APPLICATION_SUBMITTED', applied_at = NOW(), rejection_reason = NULL WHERE id = ?")) {
-            ps.setString(1, appId);
-            ps.executeUpdate();
-        }
-        insertStageHistory(conn, appId, ApplicationStage.APPLICATION_SUBMITTED, actorFullName,
-                "Re-submitted application after withdrawal");
+    public void reapplyWithdrawnApplication(MongoDatabase db, String appId, String actorFullName) {
+        col(db).updateOne(idFilter(appId), Updates.combine(
+                Updates.set("currentStage", ApplicationStage.APPLICATION_SUBMITTED.name()),
+                Updates.set("appliedAt", now()),
+                Updates.set("rejectionReason", null),
+                Updates.push("stageHistory", historyEntry(ApplicationStage.APPLICATION_SUBMITTED, actorFullName,
+                        "Re-submitted application after withdrawal"))));
     }
 
+    /**
+     * Atomic stage transition: $set currentStage (+ offer / rejection fields) and $push the trail entry
+     * in a single updateOne; then update the student's placement status when relevant.
+     */
     public void updateApplicationStage(
-            Connection conn,
+            MongoDatabase db,
             String appId,
             String studentId,
             String companyId,
@@ -156,170 +138,100 @@ public class ApplicationDao {
             String rejectionReason,
             String notes,
             String actorFullName
-    ) throws SQLException {
-        String updateAppSql = """
-                UPDATE applications SET
-                  current_stage = ?,
-                  final_offer_lpa = CASE WHEN ? IN ('SELECTED', 'OFFERED', 'JOINED') THEN COALESCE(?, final_offer_lpa) ELSE final_offer_lpa END,
-                  rejection_reason = CASE WHEN ? = 'REJECTED' THEN COALESCE(?, rejection_reason) ELSE rejection_reason END
-                WHERE id = ?
-                """;
-        try (PreparedStatement ps = conn.prepareStatement(updateAppSql)) {
-            ps.setString(1, nextStage.name());
-            ps.setString(2, nextStage.name());
-            if (offerLpa != null) {
-                ps.setDouble(3, offerLpa);
-            } else {
-                ps.setNull(3, Types.DECIMAL);
-            }
-            ps.setString(4, nextStage.name());
-            ps.setString(5, rejectionReason != null && !rejectionReason.isBlank() ? rejectionReason : notes);
-            ps.setString(6, appId);
-            ps.executeUpdate();
-        }
-
+    ) {
         String effectiveNotes = (notes != null && !notes.isBlank()) ? notes : "Moved to " + nextStage.getLabel();
-        insertStageHistory(conn, appId, nextStage, actorFullName, effectiveNotes);
+        List<Bson> updates = new ArrayList<>();
+        updates.add(Updates.set("currentStage", nextStage.name()));
+        if (nextStage.isOfferOrSelected() && offerLpa != null) {
+            updates.add(Updates.set("finalOfferLpa", offerLpa));
+        }
+        if (nextStage == ApplicationStage.REJECTED) {
+            updates.add(Updates.set("rejectionReason", rejectionReason != null && !rejectionReason.isBlank() ? rejectionReason : notes));
+        }
+        updates.add(Updates.push("stageHistory", historyEntry(nextStage, actorFullName, effectiveNotes)));
+        col(db).updateOne(idFilter(appId), Updates.combine(updates));
 
+        MongoCollection<Document> students = db.getCollection(StudentDao.COLLECTION);
         if (nextStage.isOfferOrSelected()) {
-            String updateStudentSql = """
-                    UPDATE students SET
-                      placement_status = 'PLACED',
-                      placed_company_id = COALESCE(?, placed_company_id),
-                      placed_package_lpa = COALESCE(?, placed_package_lpa)
-                    WHERE id = ?
-                    """;
-            try (PreparedStatement ps = conn.prepareStatement(updateStudentSql)) {
-                ps.setString(1, companyId != null && !companyId.isBlank() ? companyId : null);
-                if (offerLpa != null) {
-                    ps.setDouble(2, offerLpa);
-                } else {
-                    ps.setNull(2, Types.DECIMAL);
-                }
-                ps.setString(3, studentId);
-                ps.executeUpdate();
-            }
+            List<Bson> stu = new ArrayList<>();
+            stu.add(Updates.set("placementStatus", "PLACED"));
+            if (companyId != null && !companyId.isBlank()) stu.add(Updates.set("placedCompanyId", toKey(companyId)));
+            if (offerLpa != null) stu.add(Updates.set("placedPackageLpa", offerLpa));
+            stu.add(Updates.set("updatedAt", now()));
+            students.updateOne(idFilter(studentId), Updates.combine(stu));
         } else if (nextStage == ApplicationStage.SHORTLISTED) {
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "UPDATE students SET placement_status = CASE WHEN placement_status = 'UNPLACED' THEN 'SHORTLISTED' ELSE placement_status END WHERE id = ?")) {
-                ps.setString(1, studentId);
-                ps.executeUpdate();
-            }
+            students.updateOne(Filters.and(idFilter(studentId), Filters.eq("placementStatus", "UNPLACED")),
+                    Updates.set("placementStatus", "SHORTLISTED"));
         }
     }
 
-    public void withdrawApplication(Connection conn, String appId, String actorFullName) throws SQLException {
-        try (PreparedStatement ps = conn.prepareStatement(
-                "UPDATE applications SET current_stage = 'WITHDRAWN' WHERE id = ?")) {
-            ps.setString(1, appId);
-            ps.executeUpdate();
-        }
-        insertStageHistory(conn, appId, ApplicationStage.WITHDRAWN, actorFullName, "Withdrawn by candidate");
+    public void withdrawApplication(MongoDatabase db, String appId, String actorFullName) {
+        col(db).updateOne(idFilter(appId), Updates.combine(
+                Updates.set("currentStage", ApplicationStage.WITHDRAWN.name()),
+                Updates.push("stageHistory", historyEntry(ApplicationStage.WITHDRAWN, actorFullName, "Withdrawn by candidate"))));
     }
 
-    private void insertStageHistory(
-            Connection conn,
-            String appId,
-            ApplicationStage stage,
-            String updatedBy,
-            String notes
-    ) throws SQLException {
-        String sql = "INSERT INTO application_stage_history (id, application_id, stage, updated_by, notes) VALUES (?, ?, ?, ?, ?)";
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, java.util.UUID.randomUUID().toString());
-            ps.setString(2, appId);
-            ps.setString(3, stage.name());
-            ps.setString(4, updatedBy != null && !updatedBy.isBlank() ? updatedBy : "Placement Cell");
-            ps.setString(5, notes != null ? notes : "");
-            ps.executeUpdate();
-        }
+    public long count(MongoDatabase db) {
+        return col(db).countDocuments();
     }
 
-    private List<StageHistoryEntry> loadHistoryForApp(Connection conn, String appId) throws SQLException {
-        List<StageHistoryEntry> list = new ArrayList<>();
-        String sql = "SELECT application_id, stage, timestamp, updated_by, notes FROM application_stage_history WHERE application_id = ? ORDER BY timestamp ASC";
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, appId);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    StageHistoryEntry entry = new StageHistoryEntry();
-                    entry.setStage(ApplicationStage.fromString(rs.getString("stage")));
-                    Timestamp ts = rs.getTimestamp("timestamp");
-                    if (ts != null) entry.setTimestamp(ts.toInstant().toString());
-                    entry.setUpdatedBy(rs.getString("updated_by"));
-                    entry.setNotes(rs.getString("notes"));
-                    list.add(entry);
-                }
-            }
-        }
-        return list;
+    public static Document historyEntry(ApplicationStage stage, String updatedBy, String remarks) {
+        return new Document("stage", stage.name())
+                .append("updatedBy", updatedBy != null && !updatedBy.isBlank() ? updatedBy : "Placement Cell")
+                .append("timestamp", now())
+                .append("remarks", remarks != null ? remarks : "");
     }
 
-    private Map<String, List<StageHistoryEntry>> loadStageHistory(Connection conn) {
-        Map<String, List<StageHistoryEntry>> map = new HashMap<>();
-        String sql = "SELECT application_id, stage, timestamp, updated_by, notes FROM application_stage_history ORDER BY timestamp ASC";
-        try (PreparedStatement ps = conn.prepareStatement(sql);
-             ResultSet rs = ps.executeQuery()) {
-            while (rs.next()) {
-                String appId = rs.getString("application_id");
-                if (appId != null) {
-                    StageHistoryEntry entry = new StageHistoryEntry();
-                    entry.setStage(ApplicationStage.fromString(rs.getString("stage")));
-                    Timestamp ts = rs.getTimestamp("timestamp");
-                    if (ts != null) entry.setTimestamp(ts.toInstant().toString());
-                    entry.setUpdatedBy(rs.getString("updated_by"));
-                    entry.setNotes(rs.getString("notes"));
-                    map.computeIfAbsent(appId, k -> new ArrayList<>()).add(entry);
-                }
-            }
-        } catch (SQLException ignored) {
-        }
-        return map;
+    public static Document snapshotOf(Document student) {
+        if (student == null) return new Document();
+        Document am = sub(student, "academicMetrics");
+        return new Document("rollNumber", str(student, "rollNumber"))
+                .append("fullName", str(student, "fullName"))
+                .append("branch", str(student, "branch"))
+                .append("cgpa", dbl(am, "cgpa", 0));
     }
 
-    private Application mapApplication(ResultSet rs) throws SQLException {
+    // ------------------------------------------------------------------ mapping
+
+    public static Application mapApplication(Document d) {
         Application a = new Application();
-        a.setId(rs.getString("id"));
-        a.setDriveId(rs.getString("drive_id"));
-        a.setStudentId(rs.getString("student_id"));
-        a.setStudentRollNumber(safeString(rs, "student_roll_number"));
-        a.setStudentName(safeString(rs, "student_name"));
-        a.setStudentBranch(safeString(rs, "student_branch"));
-        a.setStudentCgpa(safeDouble(rs, "student_cgpa", 0));
-        a.setCompanyId(safeString(rs, "company_id"));
-        a.setCompanyName(rs.getString("company_name"));
-        a.setJobRole(rs.getString("job_role"));
-        a.setCurrentStage(ApplicationStage.fromString(safeString(rs, "current_stage")));
-        Timestamp appliedAt = safeTimestamp(rs, "applied_at");
-        if (appliedAt != null) a.setAppliedAt(appliedAt.toInstant().toString());
-        double offer = safeDouble(rs, "final_offer_lpa", -1);
-        a.setFinalOfferLpa(offer >= 0 ? offer : null);
-        a.setRejectionReason(safeString(rs, "rejection_reason"));
-        return a;
-    }
+        a.setId(id(d));
+        a.setDriveId(ref(d, "driveId"));
+        a.setStudentId(ref(d, "studentId"));
+        a.setCompanyId(ref(d, "companyId"));
+        a.setCompanyName(str(d, "companyName"));
+        a.setJobRole(str(d, "jobRole"));
 
-    private static boolean hasColumn(ResultSet rs, String column) {
-        try {
-            ResultSetMetaData meta = rs.getMetaData();
-            for (int i = 1; i <= meta.getColumnCount(); i++) {
-                if (column.equalsIgnoreCase(meta.getColumnLabel(i))) return true;
-            }
-        } catch (SQLException ignored) {
+        // Prefer the live $lookup'd student; fall back to the embedded snapshot
+        Document live = d.get("student") instanceof Document sd ? sd : null;
+        Document snap = sub(d, "studentSnapshot");
+        if (live != null) {
+            a.setStudentRollNumber(str(live, "rollNumber"));
+            a.setStudentName(str(live, "fullName"));
+            a.setStudentBranch(str(live, "branch"));
+            a.setStudentCgpa(dbl(sub(live, "academicMetrics"), "cgpa", dbl(snap, "cgpa", 0)));
+        } else {
+            a.setStudentRollNumber(str(snap, "rollNumber"));
+            a.setStudentName(str(snap, "fullName"));
+            a.setStudentBranch(str(snap, "branch"));
+            a.setStudentCgpa(dbl(snap, "cgpa", 0));
         }
-        return false;
-    }
 
-    private static String safeString(ResultSet rs, String col) throws SQLException {
-        return hasColumn(rs, col) ? rs.getString(col) : null;
-    }
+        a.setCurrentStage(ApplicationStage.fromString(str(d, "currentStage")));
+        a.setAppliedAt(iso(d, "appliedAt"));
+        a.setFinalOfferLpa(dblOrNull(d, "finalOfferLpa"));
+        a.setRejectionReason(str(d, "rejectionReason"));
 
-    private static double safeDouble(ResultSet rs, String col, double def) throws SQLException {
-        if (!hasColumn(rs, col)) return def;
-        Object obj = rs.getObject(col);
-        return obj == null ? def : ((Number) obj).doubleValue();
-    }
-
-    private static Timestamp safeTimestamp(ResultSet rs, String col) throws SQLException {
-        return hasColumn(rs, col) ? rs.getTimestamp(col) : null;
+        List<StageHistoryEntry> history = new ArrayList<>();
+        for (Document h : docList(d, "stageHistory")) {
+            StageHistoryEntry e = new StageHistoryEntry();
+            e.setStage(ApplicationStage.fromString(str(h, "stage")));
+            e.setTimestamp(iso(h, "timestamp"));
+            e.setUpdatedBy(str(h, "updatedBy"));
+            e.setNotes(str(h, "remarks"));
+            history.add(e);
+        }
+        a.setStageHistory(history);
+        return a;
     }
 }

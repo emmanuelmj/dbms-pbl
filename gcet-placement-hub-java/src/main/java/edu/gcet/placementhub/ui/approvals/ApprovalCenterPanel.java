@@ -7,6 +7,7 @@ import edu.gcet.placementhub.models.*;
 import edu.gcet.placementhub.models.GovernanceModels.*;
 import edu.gcet.placementhub.utils.DeptNormalizer;
 import edu.gcet.placementhub.utils.UiComponents.*;
+import static edu.gcet.placementhub.utils.UiComponents.*;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;

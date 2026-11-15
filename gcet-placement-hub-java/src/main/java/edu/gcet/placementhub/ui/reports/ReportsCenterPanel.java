@@ -9,6 +9,7 @@ import edu.gcet.placementhub.utils.DeptNormalizer;
 import edu.gcet.placementhub.utils.ReportExporter;
 import edu.gcet.placementhub.utils.ReportExporter.ReportKind;
 import edu.gcet.placementhub.utils.UiComponents.*;
+import static edu.gcet.placementhub.utils.UiComponents.*;
 import org.jfree.chart.ChartFactory;
 import org.jfree.chart.ChartPanel;
 import org.jfree.chart.JFreeChart;

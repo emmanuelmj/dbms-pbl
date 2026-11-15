@@ -3,7 +3,7 @@ package edu.gcet.placementhub.controllers;
 import edu.gcet.placementhub.models.*;
 import edu.gcet.placementhub.models.PlacementModels.PlacementBundle;
 import edu.gcet.placementhub.services.PlacementManagementService;
-import edu.gcet.placementhub.services.StudentManagementService.OperationResult;
+import edu.gcet.placementhub.utils.OperationResult;
 
 import javax.swing.*;
 import java.util.List;

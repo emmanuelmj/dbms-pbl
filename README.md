@@ -30,14 +30,16 @@ GCET Placement Hub aims to simplify placement activities by providing a centrali
 - Express.js
 - MySQL
 
-### Java Application
+### Java Desktop Application (MongoDB Edition)
 - Java 17
-- Java Swing
-- FlatLaf
-- JDBC
-- MySQL
-- Maven
-- JFreeChart
+- Java Swing + FlatLaf (Retina / HiDPI aware on macOS and Windows)
+- MongoDB Atlas (cloud-first) with local MongoDB Community fallback
+- Official MongoDB Java Driver 5.x (`$jsonSchema` validation, indexes, aggregation pipelines)
+- Maven Wrapper (`./mvnw`, no Maven install needed)
+- JFreeChart, OpenPDF
+
+> New teammate on a fresh laptop? Start with **[SETUP_AND_RUN.md](SETUP_AND_RUN.md)** (zero pre-installed dependencies).  
+> DBMS design report: **[MONGODB_ARCHITECTURE.md](MONGODB_ARCHITECTURE.md)**.
 
 ## Project Structure
 
@@ -101,18 +103,25 @@ npm run dev
 
 Use the scripts listed in `package.json` if the development and backend commands are different.
 
-### Java Application Setup
+### Java Desktop Application (MongoDB Edition)
 
-1. Open the `gcet-placement-hub-java` folder.
-2. Configure the required MySQL connection settings.
-3. Open a terminal in the folder containing `pom.xml`.
-4. Build the application.
+The Java 17 Desktop application has been migrated from relational SQL to a high-performance **MongoDB Atlas** document architecture (with local MongoDB Community fallback).
 
+#### 🍏 On macOS (Teammate Setup):
 ```bash
-mvn clean package
+# From repository root:
+./run-mac.sh
 ```
+*(Automatically verifies Java 17+, copies `.env.example` -> `.env` if missing, sets Retina HiDPI flags, and launches via `./mvnw clean compile exec:java`).*
 
-5. Run the generated application according to its Maven configuration.
+#### 🪟 On Windows:
+```cmd
+:: From repository root (or double-click run-windows.bat):
+run-windows.bat
+```
+*(Or via PowerShell: `.\gcet-placement-hub-java\run-windows.ps1`)*
+
+For complete details on the document schema, `$jsonSchema` governance, indexing strategy, and aggregation pipelines, see [MONGODB_ARCHITECTURE.md](MONGODB_ARCHITECTURE.md). For a step-by-step install on a machine with nothing on it (Git, JDK 17, `.env`, demo credentials, troubleshooting), see [SETUP_AND_RUN.md](SETUP_AND_RUN.md).
 
 ## Database
 

@@ -3,6 +3,7 @@ package edu.gcet.placementhub.ui.shell;
 import edu.gcet.placementhub.config.DatabaseConfig;
 import edu.gcet.placementhub.config.ThemeManager;
 import edu.gcet.placementhub.controllers.AuthController;
+import edu.gcet.placementhub.database.DatabaseConnection;
 import edu.gcet.placementhub.models.DbStatus;
 import edu.gcet.placementhub.utils.UiComponents.*;
 import static edu.gcet.placementhub.utils.UiComponents.*;
@@ -15,8 +16,9 @@ import java.util.Map;
 import java.util.function.Consumer;
 
 /**
- * Recreation of HeaderBar.tsx MySQL 8 Database Diagnostics Modal,
- * plus runtime JDBC connection testing against local MySQL `gcet_placement_hub`.
+ * MongoDB Diagnostics & Connection Settings Modal.
+ * Supports Atlas SRV cloud connections, local MongoDB community fallback,
+ * runtime URI testing, and 10-collection document verification.
  */
 public class DbDiagnosticsDialog extends JDialog {
 
@@ -27,14 +29,14 @@ public class DbDiagnosticsDialog extends JDialog {
     private JLabel subtitleLabel;
     private JLabel messageBannerLabel;
     private JPanel countsGrid;
-    private JTextField hostField, portField, dbField, userField;
-    private PasswordInputField passField;
+    private JTextField uriField;
+    private JTextField dbField;
 
     public DbDiagnosticsDialog(Window owner, DbStatus initialStatus, Consumer<DbStatus> onStatusUpdated) {
-        super(owner, "MySQL 8 Database Diagnostics — GCET Placement Hub", ModalityType.APPLICATION_MODAL);
+        super(owner, "MongoDB Atlas & Database Diagnostics — GCET Placement Hub", ModalityType.APPLICATION_MODAL);
         this.onStatusUpdated = onStatusUpdated;
 
-        setSize(640, 620);
+        setSize(700, 680);
         setLocationRelativeTo(owner);
         getContentPane().setBackground(ThemeManager.NAVY_MIDNIGHT);
         setLayout(new BorderLayout());
@@ -67,14 +69,14 @@ public class DbDiagnosticsDialog extends JDialog {
 
         JPanel topLine = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
         topLine.setOpaque(false);
-        JLabel t = new JLabel("MySQL 8 Database Diagnostics");
+        JLabel t = new JLabel("MongoDB Database Diagnostics & Settings");
         t.setFont(ThemeManager.font(Font.BOLD, 16));
         t.setForeground(Color.WHITE);
         statusBadge = new BadgeLabel("CHECKING...", new Color(51, 65, 85), Color.WHITE, null, 999);
         topLine.add(t);
         topLine.add(statusBadge);
 
-        subtitleLabel = new JLabel("Checking JDBC connectivity...");
+        subtitleLabel = new JLabel("Checking MongoDB Atlas / Local connectivity...");
         subtitleLabel.setFont(ThemeManager.font(Font.PLAIN, 11.5f));
         subtitleLabel.setForeground(ThemeManager.SLATE_400);
         subtitleLabel.setBorder(new EmptyBorder(0, 8, 0, 0));
@@ -95,50 +97,56 @@ public class DbDiagnosticsDialog extends JDialog {
 
         DatabaseConfig cfg = DatabaseConfig.getInstance();
 
-        // Runtime Connection Parameters (never hardcoded password)
+        // Runtime Connection Parameters
         RoundedCard connCard = new RoundedCard(14, new Color(23, 43, 80, 140), ThemeManager.NAVY_DEEP);
         connCard.setLayout(new BoxLayout(connCard, BoxLayout.Y_AXIS));
         connCard.setBorder(new EmptyBorder(14, 14, 14, 14));
         connCard.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        JLabel connHdr = new JLabel("JDBC CONNECTION SETTINGS (SOURCE: " + cfg.getSourceDescription() + ")");
+        JLabel connHdr = new JLabel("MONGODB CONNECTION SETTINGS (SOURCE: " + cfg.getSourceDescription() + ")");
         connHdr.setFont(ThemeManager.font(Font.BOLD, 10.5f));
         connHdr.setForeground(ThemeManager.CYAN_ACCENT);
         connHdr.setAlignmentX(Component.LEFT_ALIGNMENT);
         connCard.add(connHdr);
         connCard.add(Box.createVerticalStrut(10));
 
-        JPanel grid = new JPanel(new GridLayout(2, 2, 10, 8));
-        grid.setOpaque(false);
-        grid.setAlignmentX(Component.LEFT_ALIGNMENT);
+        uriField = createDarkTextField(cfg.getMongoUri());
+        dbField = createDarkTextField(cfg.getDatabaseName());
 
-        hostField = createDarkTextField(cfg.getHost());
-        portField = createDarkTextField(String.valueOf(cfg.getPort()));
-        dbField = createDarkTextField(cfg.getDatabase());
-        userField = createDarkTextField(cfg.getUser());
-
-        grid.add(labeledDarkField("Host", hostField));
-        grid.add(labeledDarkField("Port", portField));
-        grid.add(labeledDarkField("Database Name", dbField));
-        grid.add(labeledDarkField("MySQL User", userField));
-        connCard.add(grid);
+        connCard.add(labeledDarkField("MongoDB Connection URI (Atlas SRV or Local localhost:27017)", uriField));
         connCard.add(Box.createVerticalStrut(8));
-
-        passField = new PasswordInputField("Enter MySQL password to test connection");
-        passField.setAlignmentX(Component.LEFT_ALIGNMENT);
-        if (cfg.getPassword() != null && !cfg.getPassword().isEmpty()) {
-            passField.getPasswordField().setText(cfg.getPassword());
-        }
-        JPanel passWrap = labeledDarkField("MySQL Password (for runtime JDBC session)", passField);
-        passWrap.setAlignmentX(Component.LEFT_ALIGNMENT);
-        connCard.add(passWrap);
+        connCard.add(labeledDarkField("Database Name", dbField));
         connCard.add(Box.createVerticalStrut(10));
+
+        // Quick template buttons
+        JPanel quickBtnRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        quickBtnRow.setOpaque(false);
+        quickBtnRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        ActionButton atlasTplBtn = new ActionButton("Paste Atlas Cloud Template", new Color(0x33, 0x41, 0x55), new Color(0x47, 0x55, 0x69), Color.WHITE, null, 6);
+        atlasTplBtn.setFont(ThemeManager.font(Font.PLAIN, 11));
+        atlasTplBtn.addActionListener(e -> {
+            uriField.setText("mongodb+srv://<username>:<password>@cluster0.abcde.mongodb.net/gcet_placement_hub?retryWrites=true&w=majority");
+            dbField.setText("gcet_placement_hub");
+        });
+
+        ActionButton localTplBtn = new ActionButton("Use Local (localhost:27017)", new Color(0x33, 0x41, 0x55), new Color(0x47, 0x55, 0x69), Color.WHITE, null, 6);
+        localTplBtn.setFont(ThemeManager.font(Font.PLAIN, 11));
+        localTplBtn.addActionListener(e -> {
+            uriField.setText("mongodb://localhost:27017");
+            dbField.setText("gcet_placement_hub");
+        });
+
+        quickBtnRow.add(atlasTplBtn);
+        quickBtnRow.add(localTplBtn);
+        connCard.add(quickBtnRow);
+        connCard.add(Box.createVerticalStrut(12));
 
         JPanel btnRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
         btnRow.setOpaque(false);
         btnRow.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        ActionButton testBtn = new ActionButton("Apply & Test Live JDBC Ping (SELECT 1)", ThemeManager.BLUE_ELECTRIC, ThemeManager.BLUE_HOVER, Color.WHITE, null, 10);
+        ActionButton testBtn = new ActionButton("Apply & Test MongoDB Ping", ThemeManager.BLUE_ELECTRIC, ThemeManager.BLUE_HOVER, Color.WHITE, null, 10);
         testBtn.addActionListener(e -> {
             applyFieldsToConfig();
             refreshPing();
@@ -152,15 +160,15 @@ public class DbDiagnosticsDialog extends JDialog {
                 refreshPing();
                 JOptionPane.showMessageDialog(
                         this,
-                        "MySQL JDBC configuration saved to:\n" + saved,
+                        "MongoDB configuration saved to:\n" + saved,
                         "Configuration Saved",
                         JOptionPane.INFORMATION_MESSAGE
                 );
             } catch (Exception ex) {
                 JOptionPane.showMessageDialog(
                         this,
-                        "Could not write .env file: " + ex.getMessage(),
-                        "Save Failed",
+                        "Failed to save .env file: " + ex.getMessage(),
+                        "Save Error",
                         JOptionPane.ERROR_MESSAGE
                 );
             }
@@ -173,81 +181,124 @@ public class DbDiagnosticsDialog extends JDialog {
         body.add(connCard);
         body.add(Box.createVerticalStrut(14));
 
-        JLabel tblTitle = new JLabel("LIVE RELATIONAL TABLE RECORDS");
-        tblTitle.setFont(ThemeManager.font(Font.BOLD, 10.5f));
-        tblTitle.setForeground(ThemeManager.SLATE_400);
-        tblTitle.setAlignmentX(Component.LEFT_ALIGNMENT);
-        body.add(tblTitle);
-        body.add(Box.createVerticalStrut(8));
+        // Diagnostics Banner Card
+        RoundedCard bannerCard = new RoundedCard(14, new Color(23, 43, 80, 140), ThemeManager.NAVY_DEEP);
+        bannerCard.setLayout(new BorderLayout());
+        bannerCard.setBorder(new EmptyBorder(12, 14, 12, 14));
+        bannerCard.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        countsGrid = new JPanel(new GridLayout(0, 3, 8, 8));
-        countsGrid.setOpaque(false);
-        countsGrid.setAlignmentX(Component.LEFT_ALIGNMENT);
-        body.add(countsGrid);
+        messageBannerLabel = new JLabel("Running connection diagnostics...");
+        messageBannerLabel.setFont(ThemeManager.font(Font.PLAIN, 12));
+        messageBannerLabel.setForeground(ThemeManager.SLATE_200);
+        bannerCard.add(messageBannerLabel, BorderLayout.CENTER);
+
+        body.add(bannerCard);
         body.add(Box.createVerticalStrut(14));
 
-        RoundedCard statusBox = new RoundedCard(12, new Color(15, 23, 42), ThemeManager.NAVY_DEEP);
-        statusBox.setLayout(new BorderLayout());
-        statusBox.setBorder(new EmptyBorder(12, 14, 12, 14));
-        statusBox.setAlignmentX(Component.LEFT_ALIGNMENT);
-        messageBannerLabel = new JLabel("Testing MySQL JDBC connection...");
-        messageBannerLabel.setFont(ThemeManager.font(Font.PLAIN, 11.5f));
-        messageBannerLabel.setForeground(ThemeManager.SLATE_200);
-        statusBox.add(messageBannerLabel, BorderLayout.CENTER);
-        body.add(statusBox);
+        // 10 Collections live count grid
+        JLabel colHdr = new JLabel("COLLECTION VERIFICATION & DOCUMENT COUNTS");
+        colHdr.setFont(ThemeManager.font(Font.BOLD, 10.5f));
+        colHdr.setForeground(ThemeManager.CYAN_ACCENT);
+        colHdr.setAlignmentX(Component.LEFT_ALIGNMENT);
+        body.add(colHdr);
+        body.add(Box.createVerticalStrut(8));
 
-        JScrollPane sp = new JScrollPane(body);
-        sp.setBorder(null);
-        sp.getVerticalScrollBar().setUnitIncrement(18);
-        return sp;
-    }
+        countsGrid = new JPanel(new GridLayout(0, 2, 10, 8));
+        countsGrid.setOpaque(false);
+        countsGrid.setAlignmentX(Component.LEFT_ALIGNMENT);
+        buildInitialCountsPlaceholder();
+        body.add(countsGrid);
 
-    private JPanel buildFooter() {
-        JPanel footer = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 12));
-        footer.setBackground(ThemeManager.NAVY_MIDNIGHT);
-        footer.setBorder(new MatteBorder(1, 0, 0, 0, ThemeManager.NAVY_DEEP));
-
-        ActionButton closeBtn = new ActionButton("Close Diagnostics", ThemeManager.BLUE_ELECTRIC, ThemeManager.BLUE_HOVER, Color.WHITE, null, 10);
-        closeBtn.addActionListener(e -> dispose());
-        footer.add(closeBtn);
-        return footer;
-    }
-
-    private JTextField createDarkTextField(String val) {
-        JTextField tf = new JTextField(val);
-        tf.setFont(ThemeManager.monoFont(Font.BOLD, 12));
-        tf.setPreferredSize(new Dimension(160, 32));
-        return tf;
-    }
-
-    private JPanel labeledDarkField(String label, Component comp) {
-        JPanel p = new JPanel(new BorderLayout(0, 3));
-        p.setOpaque(false);
-        JLabel l = new JLabel(label);
-        l.setFont(ThemeManager.font(Font.PLAIN, 10.5f));
-        l.setForeground(ThemeManager.SLATE_400);
-        p.add(l, BorderLayout.NORTH);
-        p.add(comp, BorderLayout.CENTER);
-        return p;
+        JScrollPane scroll = new JScrollPane(body);
+        scroll.setBorder(null);
+        scroll.getVerticalScrollBar().setUnitIncrement(12);
+        return scroll;
     }
 
     private void applyFieldsToConfig() {
-        int p = 3306;
-        try {
-            p = Integer.parseInt(portField.getText().trim());
-        } catch (NumberFormatException ignored) {
-        }
-        DatabaseConfig.getInstance().updateRuntimeCredentials(
-                hostField.getText(),
-                p,
-                dbField.getText(),
-                userField.getText(),
-                passField.getPasswordText()
-        );
+        String u = uriField.getText() != null ? uriField.getText().trim() : "";
+        String d = dbField.getText() != null ? dbField.getText().trim() : "gcet_placement_hub";
+        DatabaseConfig.getInstance().updateRuntimeConnection(u, d);
+        DatabaseConnection.getInstance().reconnect();
     }
 
-    private void refreshPing() {
+    private JPanel labeledDarkField(String label, JComponent field) {
+        JPanel p = new JPanel(new BorderLayout(0, 4));
+        p.setOpaque(false);
+        p.setMaximumSize(new Dimension(Integer.MAX_VALUE, 58));
+        JLabel l = new JLabel(label);
+        l.setFont(ThemeManager.font(Font.BOLD, 11));
+        l.setForeground(ThemeManager.SLATE_300);
+        p.add(l, BorderLayout.NORTH);
+        p.add(field, BorderLayout.CENTER);
+        return p;
+    }
+
+    private JTextField createDarkTextField(String val) {
+        JTextField f = new JTextField(val != null ? val : "");
+        f.setFont(ThemeManager.monoFont(Font.PLAIN, 12));
+        f.setForeground(Color.WHITE);
+        f.setCaretColor(Color.WHITE);
+        f.setBackground(new Color(11, 20, 38));
+        f.setBorder(BorderFactory.createCompoundBorder(
+                new MatteBorder(1, 1, 1, 1, ThemeManager.NAVY_DEEP),
+                new EmptyBorder(6, 10, 6, 10)
+        ));
+        return f;
+    }
+
+    private void buildInitialCountsPlaceholder() {
+        countsGrid.removeAll();
+        for (String col : DatabaseConnection.REQUIRED_COLLECTIONS) {
+            countsGrid.add(createCountBadge(col, -1));
+        }
+        countsGrid.revalidate();
+        countsGrid.repaint();
+    }
+
+    private JPanel createCountBadge(String colName, int count) {
+        RoundedCard card = new RoundedCard(10, new Color(15, 23, 42), ThemeManager.NAVY_DEEP);
+        card.setLayout(new BorderLayout());
+        card.setBorder(new EmptyBorder(8, 12, 8, 12));
+
+        JLabel nameLbl = new JLabel(colName);
+        nameLbl.setFont(ThemeManager.monoFont(Font.PLAIN, 11.5f));
+        nameLbl.setForeground(ThemeManager.SLATE_200);
+
+        JLabel countLbl = new JLabel(count >= 0 ? count + " docs" : "...");
+        countLbl.setFont(ThemeManager.monoFont(Font.BOLD, 11.5f));
+        countLbl.setForeground(count > 0 ? ThemeManager.CYAN_ACCENT : (count == 0 ? ThemeManager.SLATE_400 : ThemeManager.SLATE_500));
+
+        card.add(nameLbl, BorderLayout.WEST);
+        card.add(countLbl, BorderLayout.EAST);
+        return card;
+    }
+
+    private JPanel buildFooter() {
+        JPanel ftr = new JPanel(new BorderLayout());
+        ftr.setBackground(ThemeManager.NAVY_MIDNIGHT);
+        ftr.setBorder(BorderFactory.createCompoundBorder(
+                new MatteBorder(1, 0, 0, 0, ThemeManager.NAVY_DEEP),
+                new EmptyBorder(12, 20, 12, 20)
+        ));
+
+        JLabel hint = new JLabel("Atlas Tip: Whitelist IP 0.0.0.0/0 in Atlas Network Access for testing.");
+        hint.setFont(ThemeManager.font(Font.ITALIC, 11));
+        hint.setForeground(ThemeManager.SLATE_400);
+
+        ActionButton closeBtn = new ActionButton("Close Diagnostics", new Color(51, 65, 85), new Color(71, 85, 105), Color.WHITE, null, 8);
+        closeBtn.addActionListener(e -> dispose());
+
+        ftr.add(hint, BorderLayout.WEST);
+        ftr.add(closeBtn, BorderLayout.EAST);
+        return ftr;
+    }
+
+    public void refreshPing() {
         statusBadge.setText("PINGING...");
+        statusBadge.setBadgeColors(new Color(51, 65, 85), Color.WHITE, null);
+        messageBannerLabel.setText("Checking connection to " + DatabaseConfig.getInstance().getHostLabel() + "...");
+
         authController.checkDatabaseHealthAsync(status -> {
             applyStatus(status);
             if (onStatusUpdated != null) {
@@ -256,40 +307,38 @@ public class DbDiagnosticsDialog extends JDialog {
         });
     }
 
-    private void applyStatus(DbStatus st) {
-        subtitleLabel.setText("Host: " + st.getHost() + ":" + st.getPort() + " · Database: " + st.getDatabase());
-        if (st.isConnected()) {
+    private void applyStatus(DbStatus status) {
+        if (status == null) return;
+
+        if (status.isConnected()) {
             statusBadge.setText("CONNECTED");
-            statusBadge.setBadgeColors(new Color(16, 185, 129, 45), new Color(0x34, 0xD3, 0x99), new Color(16, 185, 129, 100));
-            messageBannerLabel.setForeground(new Color(0xA7, 0xF3, 0xD0));
-            messageBannerLabel.setText("<html><body style='width:530px;'><b>Connected:</b> Local MySQL database responded to <code>SELECT 1 AS ping</code> via JDBC."
-                    + (st.getLastSuccessfulConnectionIso() != null ? "<br/>Last successful ping: " + st.getLastSuccessfulConnectionIso() : "")
-                    + "</body></html>");
+            statusBadge.setBadgeColors(new Color(16, 185, 129, 40), ThemeManager.EMERALD_PRIMARY, new Color(16, 185, 129, 90));
+            subtitleLabel.setText(status.getClusterType() + " · " + status.getHost() + " · Latency: " + status.getPingLatencyMs() + " ms");
+            messageBannerLabel.setForeground(ThemeManager.EMERALD_PRIMARY);
+            messageBannerLabel.setText("<html><b>Cluster Connected:</b> " + esc(status.getMessage())
+                    + (status.isUsingLocalFallback() ? "<br/><i>Notice: Running on local MongoDB fallback server (Atlas was unreachable).</i>" : "")
+                    + "</html>");
         } else {
             statusBadge.setText("DISCONNECTED");
-            statusBadge.setBadgeColors(new Color(244, 63, 94, 45), new Color(0xFB, 0x71, 0x85), new Color(244, 63, 94, 100));
-            messageBannerLabel.setForeground(new Color(0xFE, 0xCD, 0xD3));
-            messageBannerLabel.setText("<html><body style='width:530px;'><b>Disconnected:</b> "
-                    + (st.getLastError() != null ? st.getLastError() : "Could not connect to MySQL")
-                    + "<br/>Ensure MySQL80 is running on your laptop and enter your DB password above or in <code>.env</code>.</body></html>");
+            statusBadge.setBadgeColors(new Color(225, 29, 72, 40), ThemeManager.ROSE_PRIMARY, new Color(225, 29, 72, 90));
+            subtitleLabel.setText("Failed to connect to " + DatabaseConfig.getInstance().getHostLabel());
+            messageBannerLabel.setForeground(ThemeManager.ROSE_PRIMARY);
+            messageBannerLabel.setText("<html><b>Connection Failed:</b> " + esc(status.getLastError() != null ? status.getLastError() : status.getMessage())
+                    + "<br/><b>Remediation:</b> Verify MongoDB is running or check Atlas IP whitelist (0.0.0.0/0).</html>");
         }
 
-        countsGrid.removeAll();
-        for (Map.Entry<String, Integer> entry : st.getTableCounts().entrySet()) {
-            RoundedCard cell = new RoundedCard(8, new Color(23, 43, 80, 90), ThemeManager.NAVY_DEEP);
-            cell.setLayout(new BorderLayout());
-            cell.setBorder(new EmptyBorder(6, 10, 6, 10));
-            JLabel tbl = new JLabel(entry.getKey());
-            tbl.setFont(ThemeManager.monoFont(Font.PLAIN, 11));
-            tbl.setForeground(ThemeManager.SLATE_300);
-            JLabel cnt = new JLabel(String.valueOf(entry.getValue()));
-            cnt.setFont(ThemeManager.font(Font.BOLD, 12));
-            cnt.setForeground(ThemeManager.CYAN_ACCENT);
-            cell.add(tbl, BorderLayout.WEST);
-            cell.add(cnt, BorderLayout.EAST);
-            countsGrid.add(cell);
+        if (status.getTableCounts() != null && !status.getTableCounts().isEmpty()) {
+            countsGrid.removeAll();
+            for (Map.Entry<String, Integer> e : status.getTableCounts().entrySet()) {
+                countsGrid.add(createCountBadge(e.getKey(), e.getValue()));
+            }
+            countsGrid.revalidate();
+            countsGrid.repaint();
         }
-        countsGrid.revalidate();
-        countsGrid.repaint();
+    }
+
+    private static String esc(String s) {
+        if (s == null) return "";
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
     }
 }

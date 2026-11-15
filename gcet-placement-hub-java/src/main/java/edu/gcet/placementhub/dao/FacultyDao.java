@@ -1,160 +1,188 @@
 package edu.gcet.placementhub.dao;
 
+import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoDatabase;
+import com.mongodb.client.model.Filters;
+import com.mongodb.client.model.Sorts;
 import edu.gcet.placementhub.models.Faculty;
 import edu.gcet.placementhub.utils.DeptNormalizer;
+import org.bson.Document;
 
-import java.sql.*;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+
+import static edu.gcet.placementhub.database.BsonUtil.*;
 
 /**
- * JDBC Data Access Object querying `users` + `faculty` tables for the GCET Faculty Directory.
+ * Data Access Object for the referenced {@code faculty} collection
+ * ({@code userId} -> {@code users._id}; {@code authorizedDepartments[]} embedded).
+ *
+ * <pre>
+ * { _id, userId: ObjectId, facultyId, employeeId, fullName, department, designation, email, phone,
+ *   authorizedDepartments: [], facultyApproved, adminApproved, status, approvedByName, rejectionReason, createdAt }
+ * </pre>
  */
 public class FacultyDao {
 
-    public List<Faculty> findAll(Connection conn) throws SQLException {
+    public static final String COLLECTION = "faculty";
+
+    public static MongoCollection<Document> col(MongoDatabase db) {
+        return db.getCollection(COLLECTION);
+    }
+
+    /** Merges FACULTY users with their faculty profile (two queries + in-memory join by userId / email). */
+    public List<Faculty> findAll(MongoDatabase db) {
         List<Faculty> result = new ArrayList<>();
         Set<String> seenKeys = new HashSet<>();
 
-        String sql = """
-                SELECT u.id AS user_id, u.username, u.email, u.full_name, u.department, u.status AS user_status,
-                       u.is_active, u.authorized_departments AS user_auth_depts, u.approved_by, u.rejection_reason AS user_rej,
-                       u.created_at,
-                       f.id AS faculty_row_id, f.faculty_id, f.employee_id, f.designation, f.phone,
-                       f.authorized_departments AS fac_auth_depts, f.faculty_approved, f.admin_approved,
-                       f.approved_by_name, f.rejection_reason AS fac_rej, f.status AS fac_status
-                FROM users u
-                LEFT JOIN faculty f ON f.user_id = u.id OR LOWER(f.email) = LOWER(u.email)
-                WHERE u.role = 'FACULTY'
-                ORDER BY u.created_at DESC
-                """;
-
-        try (PreparedStatement ps = conn.prepareStatement(sql);
-             ResultSet rs = ps.executeQuery()) {
-            while (rs.next()) {
-                Faculty f = new Faculty();
-                String uid = rs.getString("user_id");
-                String username = rs.getString("username");
-                String rowId = rs.getString("faculty_row_id");
-                f.setId(rowId != null && !rowId.isBlank() ? rowId : uid);
-                f.setUserId(uid);
-                f.setUsername(username);
-
-                String empId = rs.getString("employee_id");
-                if (empId == null || empId.isBlank()) {
-                    empId = rs.getString("faculty_id");
-                }
-                if (empId == null || empId.isBlank()) {
-                    empId = username != null ? username.toUpperCase(Locale.ROOT) : "-";
-                }
-                f.setEmployeeId(empId);
-
-                f.setFullName(rs.getString("full_name"));
-                f.setDepartment(rs.getString("department"));
-                String desig = rs.getString("designation");
-                f.setDesignation(desig != null && !desig.isBlank() ? desig : "Faculty Coordinator");
-                f.setEmail(rs.getString("email"));
-                f.setPhone(rs.getString("phone"));
-
-                String rawAuth = rs.getString("user_auth_depts");
-                if (rawAuth == null || rawAuth.isBlank()) {
-                    rawAuth = rs.getString("fac_auth_depts");
-                }
-                List<String> authDepts = parseDepartments(rawAuth);
-                if (authDepts.isEmpty()) {
-                    authDepts = new ArrayList<>(DeptNormalizer.getFacultyAuthorizedDepts(username));
-                }
-                if (authDepts.isEmpty() && f.getDepartment() != null && !f.getDepartment().isBlank()) {
-                    authDepts = List.of(f.getDepartment());
-                }
-                f.setAuthorizedDepartments(authDepts);
-
-                String uStatus = rs.getString("user_status");
-                String fStatus = rs.getString("fac_status");
-                String effStatus = uStatus != null ? uStatus : (fStatus != null ? fStatus : "APPROVED");
-                if ("PENDING_APPROVAL".equalsIgnoreCase(effStatus)) {
-                    effStatus = "PENDING";
-                }
-                f.setStatus(effStatus);
-                f.setActive(rs.getBoolean("is_active"));
-                f.setFacultyApproved(rs.getObject("faculty_approved") == null || rs.getBoolean("faculty_approved"));
-                f.setAdminApproved(rs.getObject("admin_approved") == null ? !"PENDING".equalsIgnoreCase(effStatus) : rs.getBoolean("admin_approved"));
-
-                String appBy = rs.getString("approved_by_name");
-                if (appBy == null || appBy.isBlank()) appBy = rs.getString("approved_by");
-                f.setApprovedByName(appBy);
-
-                String rej = rs.getString("fac_rej");
-                if (rej == null || rej.isBlank()) rej = rs.getString("user_rej");
-                f.setRejectionReason(rej);
-
-                Timestamp ts = rs.getTimestamp("created_at");
-                if (ts != null) f.setCreatedAt(ts.toInstant().toString());
-
-                result.add(f);
-                if (f.getEmail() != null) seenKeys.add(f.getEmail().toLowerCase(Locale.ROOT));
-                if (f.getUserId() != null) seenKeys.add(f.getUserId());
-            }
+        Map<String, Document> profilesByUser = new HashMap<>();
+        Map<String, Document> profilesByEmail = new HashMap<>();
+        List<Document> allProfiles = new ArrayList<>();
+        for (Document f : col(db).find().sort(Sorts.descending("createdAt"))) {
+            allProfiles.add(f);
+            String uid = ref(f, "userId");
+            if (uid != null) profilesByUser.put(uid, f);
+            String em = lower(str(f, "email"));
+            if (!em.isEmpty()) profilesByEmail.put(em, f);
         }
 
-        // Also include standalone rows from `faculty` table if any exist without a `users` entry
-        String standaloneSql = "SELECT * FROM faculty ORDER BY created_at DESC";
-        try (PreparedStatement ps = conn.prepareStatement(standaloneSql);
-             ResultSet rs = ps.executeQuery()) {
-            while (rs.next()) {
-                String email = rs.getString("email");
-                String uid = rs.getString("user_id");
-                if ((email != null && seenKeys.contains(email.toLowerCase(Locale.ROOT)))
-                        || (uid != null && seenKeys.contains(uid))) {
-                    continue;
-                }
-                Faculty f = new Faculty();
-                f.setId(rs.getString("id"));
-                f.setUserId(uid);
-                String facId = rs.getString("faculty_id");
-                f.setUsername(facId);
-                String empId = rs.getString("employee_id");
-                f.setEmployeeId(empId != null && !empId.isBlank() ? empId : facId);
-                f.setFullName(rs.getString("full_name"));
-                f.setDepartment(rs.getString("department"));
-                f.setDesignation(rs.getString("designation"));
-                f.setEmail(email);
-                f.setPhone(rs.getString("phone"));
-                List<String> authDepts = parseDepartments(rs.getString("authorized_departments"));
-                if (authDepts.isEmpty() && f.getDepartment() != null && !f.getDepartment().isBlank()) {
-                    authDepts = List.of(f.getDepartment());
-                }
-                f.setAuthorizedDepartments(authDepts);
-                f.setFacultyApproved(rs.getBoolean("faculty_approved"));
-                f.setAdminApproved(rs.getBoolean("admin_approved"));
-                f.setApprovedByName(rs.getString("approved_by_name"));
-                f.setRejectionReason(rs.getString("rejection_reason"));
-                String status = rs.getString("status");
-                f.setStatus(status != null ? status : "ACTIVE");
-                f.setActive("ACTIVE".equalsIgnoreCase(f.getStatus()) || "APPROVED".equalsIgnoreCase(f.getStatus()));
-                Timestamp ts = rs.getTimestamp("created_at");
-                if (ts != null) f.setCreatedAt(ts.toInstant().toString());
-                result.add(f);
+        for (Document u : db.getCollection(UserDao.COLLECTION).find(Filters.eq("role", "FACULTY")).sort(Sorts.descending("createdAt"))) {
+            String uid = id(u);
+            String username = str(u, "username");
+            Document f = profilesByUser.get(uid);
+            if (f == null) f = profilesByEmail.get(lower(str(u, "email")));
+
+            Faculty fac = new Faculty();
+            fac.setId(f != null ? id(f) : uid);
+            fac.setUserId(uid);
+            fac.setUsername(username);
+
+            String empId = f != null ? str(f, "employeeId") : null;
+            if (empId == null || empId.isBlank()) empId = f != null ? str(f, "facultyId") : null;
+            if (empId == null || empId.isBlank()) empId = str(u, "employeeId");
+            if (empId == null || empId.isBlank()) empId = username != null ? username.toUpperCase(Locale.ROOT) : "-";
+            fac.setEmployeeId(empId);
+
+            fac.setFullName(str(u, "fullName"));
+            fac.setDepartment(str(u, "department"));
+            String desig = f != null ? str(f, "designation") : str(u, "designation");
+            fac.setDesignation(desig != null && !desig.isBlank() ? desig : "Faculty Coordinator");
+            fac.setEmail(str(u, "email"));
+            fac.setPhone(f != null ? str(f, "phone") : str(u, "phone"));
+
+            List<String> authDepts = strList(u, "authorizedDepartments");
+            if (authDepts.isEmpty() && f != null) authDepts = strList(f, "authorizedDepartments");
+            if (authDepts.isEmpty()) authDepts = new ArrayList<>(DeptNormalizer.getFacultyAuthorizedDepts(username));
+            if (authDepts.isEmpty() && fac.getDepartment() != null && !fac.getDepartment().isBlank()) {
+                authDepts = List.of(fac.getDepartment());
             }
-        } catch (SQLException ignored) {
-            // Gracefully handle if faculty table has no additional records
+            fac.setAuthorizedDepartments(authDepts);
+
+            String uStatus = str(u, "status");
+            String fStatus = f != null ? str(f, "status") : null;
+            String effStatus = uStatus != null ? uStatus : (fStatus != null ? fStatus : "APPROVED");
+            if ("PENDING_APPROVAL".equalsIgnoreCase(effStatus)) effStatus = "PENDING";
+            fac.setStatus(effStatus);
+            fac.setActive(bool(u, "isActive", true));
+            fac.setFacultyApproved(f == null || !f.containsKey("facultyApproved") || bool(f, "facultyApproved", true));
+            fac.setAdminApproved(f == null || !f.containsKey("adminApproved")
+                    ? !"PENDING".equalsIgnoreCase(effStatus)
+                    : bool(f, "adminApproved", false));
+
+            String appBy = f != null ? str(f, "approvedByName") : null;
+            if (appBy == null || appBy.isBlank()) appBy = str(u, "approvedByName");
+            if (appBy == null || appBy.isBlank()) appBy = ref(u, "approvedBy");
+            fac.setApprovedByName(appBy);
+
+            String rej = f != null ? str(f, "rejectionReason") : null;
+            if (rej == null || rej.isBlank()) rej = str(u, "rejectionReason");
+            fac.setRejectionReason(rej);
+            fac.setCreatedAt(iso(u, "createdAt"));
+
+            result.add(fac);
+            if (fac.getEmail() != null) seenKeys.add(lower(fac.getEmail()));
+            seenKeys.add(uid);
+            if (f != null) seenKeys.add(id(f));
         }
 
+        // Standalone faculty profiles without a users account
+        for (Document f : allProfiles) {
+            String email = lower(str(f, "email"));
+            String uid = ref(f, "userId");
+            if ((!email.isEmpty() && seenKeys.contains(email)) || (uid != null && seenKeys.contains(uid)) || seenKeys.contains(id(f))) {
+                continue;
+            }
+            result.add(mapFaculty(f));
+        }
         return result;
     }
 
-    private List<String> parseDepartments(String raw) {
-        List<String> out = new ArrayList<>();
-        if (raw == null || raw.isBlank()) return out;
-        String trimmed = raw.trim();
-        if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-            trimmed = trimmed.substring(1, trimmed.length() - 1);
+    public Faculty findByUserId(MongoDatabase db, String userId) {
+        Document d = col(db).find(refFilter("userId", userId)).first();
+        return d == null ? null : mapFaculty(d);
+    }
+
+    public String insertFaculty(MongoDatabase db, Faculty f) {
+        Document d = toDocument(f);
+        col(db).insertOne(d);
+        f.setId(id(d));
+        return f.getId();
+    }
+
+    public long count(MongoDatabase db) {
+        return col(db).countDocuments();
+    }
+
+    public static Faculty mapFaculty(Document d) {
+        Faculty f = new Faculty();
+        f.setId(id(d));
+        f.setUserId(ref(d, "userId"));
+        String facId = str(d, "facultyId");
+        f.setUsername(facId);
+        String empId = str(d, "employeeId");
+        f.setEmployeeId(empId != null && !empId.isBlank() ? empId : facId);
+        f.setFullName(str(d, "fullName"));
+        f.setDepartment(str(d, "department"));
+        f.setDesignation(str(d, "designation", "Faculty Coordinator"));
+        f.setEmail(str(d, "email"));
+        f.setPhone(str(d, "phone"));
+        List<String> authDepts = strList(d, "authorizedDepartments");
+        if (authDepts.isEmpty() && f.getDepartment() != null && !f.getDepartment().isBlank()) {
+            authDepts = List.of(f.getDepartment());
         }
-        for (String part : trimmed.split(",")) {
-            String clean = part.replace("\"", "").trim();
-            if (!clean.isEmpty()) {
-                out.add(clean);
-            }
-        }
-        return out;
+        f.setAuthorizedDepartments(authDepts);
+        f.setFacultyApproved(bool(d, "facultyApproved", true));
+        f.setAdminApproved(bool(d, "adminApproved", false));
+        f.setApprovedByName(str(d, "approvedByName"));
+        f.setRejectionReason(str(d, "rejectionReason"));
+        f.setStatus(str(d, "status", "ACTIVE"));
+        f.setActive("ACTIVE".equalsIgnoreCase(f.getStatus()) || "APPROVED".equalsIgnoreCase(f.getStatus()));
+        f.setCreatedAt(iso(d, "createdAt"));
+        return f;
+    }
+
+    public static Document toDocument(Faculty f) {
+        Document d = new Document();
+        if (f.getId() != null && !f.getId().isBlank()) d.append("_id", toKey(f.getId()));
+        return d.append("userId", toKey(f.getUserId()))
+                .append("facultyId", f.getEmployeeId())
+                .append("employeeId", f.getEmployeeId())
+                .append("fullName", f.getFullName())
+                .append("department", f.getDepartment())
+                .append("designation", nvl(f.getDesignation(), "Faculty Coordinator"))
+                .append("email", f.getEmail())
+                .append("phone", nvl(f.getPhone(), ""))
+                .append("authorizedDepartments", new ArrayList<>(f.getAuthorizedDepartments()))
+                .append("facultyApproved", f.isFacultyApproved())
+                .append("adminApproved", f.isAdminApproved())
+                .append("status", nvl(f.getStatus(), "PENDING_APPROVAL"))
+                .append("approvedByName", f.getApprovedByName())
+                .append("rejectionReason", f.getRejectionReason())
+                .append("createdAt", f.getCreatedAt() != null ? toDateOrToday(f.getCreatedAt()) : now());
     }
 }
