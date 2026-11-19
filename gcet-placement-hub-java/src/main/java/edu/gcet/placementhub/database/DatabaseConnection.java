@@ -463,6 +463,99 @@ public final class DatabaseConnection {
         return out;
     }
 
+    /**
+     * Executes a live find query with custom JSON filter and optional sort.
+     */
+    public List<Document> executeFind(String collection, String filterJson, String sortJson, int limit) throws DatabaseException {
+        MongoDatabase db = getDatabase();
+        Document filter = (filterJson == null || filterJson.isBlank()) ? new Document() : Document.parse(filterJson);
+        var findIterable = db.getCollection(collection).find(filter).limit(Math.max(1, Math.min(100, limit)));
+        if (sortJson != null && !sortJson.isBlank()) {
+            findIterable.sort(Document.parse(sortJson));
+        }
+        List<Document> out = new ArrayList<>();
+        findIterable.into(out);
+        return out;
+    }
+
+    /**
+     * Explains a find query with executionStats (showing IXSCAN vs COLLSCAN).
+     */
+    public String explainFind(String collection, String filterJson) throws DatabaseException {
+        MongoDatabase db = getDatabase();
+        Document filter = (filterJson == null || filterJson.isBlank()) ? new Document() : Document.parse(filterJson);
+        Document cmd = new Document("explain", new Document("find", collection).append("filter", filter))
+                .append("verbosity", "executionStats");
+        return db.runCommand(cmd).toJson();
+    }
+
+    /**
+     * Performs a live write-and-read probe against the database to prove live cloud persistence.
+     */
+    public Document performCloudLiveProbe() throws DatabaseException {
+        MongoDatabase db = getDatabase();
+        long t0 = System.currentTimeMillis();
+        org.bson.types.ObjectId probeId = new org.bson.types.ObjectId();
+        Document probeDoc = new Document("_id", probeId)
+                .append("action", "FACULTY_EVAL_CLOUD_PROBE")
+                .append("actor", "DBMS_FACULTY_EVALUATOR")
+                .append("clusterType", DatabaseConfig.getInstance().getClusterType())
+                .append("database", db.getName())
+                .append("timestamp", new java.util.Date())
+                .append("clientIp", resolveLanIp())
+                .append("details", "Live write-and-read persistence probe executed during DBMS PBL evaluation.");
+
+        // Write to audit_logs
+        db.getCollection("audit_logs").insertOne(probeDoc);
+        long writeMs = System.currentTimeMillis() - t0;
+
+        // Read back from cloud
+        long t1 = System.currentTimeMillis();
+        Document readBack = db.getCollection("audit_logs").find(new Document("_id", probeId)).first();
+        long readMs = System.currentTimeMillis() - t1;
+
+        if (readBack == null) {
+            throw new DatabaseException("Cloud write acknowledged but document could not be read back.");
+        }
+
+        return new Document("status", "SUCCESS")
+                .append("probeId", probeId.toHexString())
+                .append("clusterType", DatabaseConfig.getInstance().getClusterType())
+                .append("database", db.getName())
+                .append("writeLatencyMs", writeMs)
+                .append("readLatencyMs", readMs)
+                .append("totalRoundTripMs", (writeMs + readMs))
+                .append("persistedDocument", readBack);
+    }
+
+    /**
+     * Attempts an intentionally invalid insert to demonstrate server-side $jsonSchema rejection.
+     */
+    public Document testJsonSchemaViolation() throws DatabaseException {
+        MongoDatabase db = getDatabase();
+        // Violates students $jsonSchema: cgpa is 14.5 (maximum 10.0), and required rollNumber is missing
+        Document invalidStudent = new Document("fullName", "Invalid Student Test")
+                .append("email", "not-an-email")
+                .append("branch", "CSE")
+                .append("academicMetrics", new Document("cgpa", 14.5).append("backlogs", -1).append("graduationYear", 2026))
+                .append("approvalStatus", "NON_EXISTENT_STATUS")
+                .append("placementStatus", "UNPLACED")
+                .append("createdAt", new java.util.Date());
+
+        try {
+            db.getCollection("students").insertOne(invalidStudent);
+            // If it somehow succeeded, clean up
+            db.getCollection("students").deleteOne(new Document("fullName", "Invalid Student Test"));
+            return new Document("rejected", false)
+                    .append("message", "Document was unexpectedly accepted by MongoDB.");
+        } catch (com.mongodb.MongoWriteException ex) {
+            return new Document("rejected", true)
+                    .append("expectedErrorCode", ex.getCode())
+                    .append("errorCategory", ex.getError().getCategory().name())
+                    .append("serverErrorMessage", ex.getMessage());
+        }
+    }
+
     // ----------------------------------------------------------------- getters
 
     public boolean isLastKnownConnected() {

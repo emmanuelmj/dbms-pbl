@@ -39,7 +39,7 @@ public class SidebarPanel extends JPanel {
             new NavItem("applications", "Applications", "▤", null, false),
             new NavItem("reports", "Reports & Analytics", "▥", null, false),
             new NavItem("audit-logs", "Audit Logs", "∿", null, true),
-            new NavItem("diagnostics", "DB Diagnostics", "DB", null, true),
+            new NavItem("diagnostics", "DBMS Faculty Console", "⚡", "Atlas", false),
             new NavItem("settings", "Settings & Security", "⚙", null, false)
     );
 

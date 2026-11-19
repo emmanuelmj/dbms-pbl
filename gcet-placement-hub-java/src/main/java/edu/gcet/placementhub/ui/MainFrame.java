@@ -655,7 +655,7 @@ public class MainFrame extends JFrame {
         ActionButton backDashBtn = new ActionButton("←  Return to Dashboard", ThemeManager.BLUE_ELECTRIC, ThemeManager.BLUE_HOVER, Color.WHITE, null, 12);
         backDashBtn.addActionListener(e -> navigateToPage("dashboard"));
 
-        ActionButton diagBtn = new ActionButton("Inspect Live MySQL 8 JDBC Diagnostics", ThemeManager.cardSubtleBg(), ThemeManager.cardBorder(), ThemeManager.primaryText(), ThemeManager.cardBorder(), 12);
+        ActionButton diagBtn = new ActionButton("Inspect Live MongoDB Cloud Diagnostics", ThemeManager.cardSubtleBg(), ThemeManager.cardBorder(), ThemeManager.primaryText(), ThemeManager.cardBorder(), 12);
         diagBtn.addActionListener(e -> {
             DbDiagnosticsDialog dlg = new DbDiagnosticsDialog(this, latestDbStatus, status -> {
                 latestDbStatus = status;

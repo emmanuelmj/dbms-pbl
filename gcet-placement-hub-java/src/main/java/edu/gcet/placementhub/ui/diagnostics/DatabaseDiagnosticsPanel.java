@@ -65,6 +65,29 @@ public class DatabaseDiagnosticsPanel extends JPanel {
     private final JTextArea pipelineOutputArea = new JTextArea();
     private final JTextArea schemaRulesArea = new JTextArea();
 
+    // Custom Query Console components
+    private final JComboBox<String> customColCombo = new JComboBox<>(new String[]{
+            "students", "placement_drives", "applications", "users", "companies",
+            "faculty", "skills", "audit_logs", "approvals", "announcements"
+    });
+    private final JComboBox<String> customPresetCombo = new JComboBox<>(new String[]{
+            "-- Select Query Preset / Template --",
+            "Students: CGPA >= 8.5 & 0 Backlogs",
+            "Students: Embedded Skills ($elemMatch Python rating >= 4)",
+            "Students: Placed with Package >= 10 LPA",
+            "Placement Drives: CTC >= 10 LPA & OPEN",
+            "Placement Drives: Required Skill 'Java' or 'Spring Boot'",
+            "Applications: Status OFFERED or SELECTED",
+            "Applications: Stage History containing TECHNICAL_INTERVIEW",
+            "Companies: Tier 1 Dream Companies",
+            "Audit Logs: Faculty & Admin Probe Events"
+    });
+    private final JTextArea queryFilterArea = new JTextArea();
+    private final JTextField querySortField = new JTextField();
+    private final JSpinner queryLimitSpinner = new JSpinner(new SpinnerNumberModel(20, 1, 100, 5));
+    private final JTextArea queryResultsArea = new JTextArea();
+    private final JLabel queryStatsLabel = new JLabel("Ready to execute live MongoDB query.");
+
     private final JComboBox<String> sampleColCombo = new JComboBox<>(new String[]{
             "students", "placement_drives", "applications", "users", "companies",
             "faculty", "skills", "approvals", "admin_requests", "announcements", "audit_logs"
@@ -143,6 +166,8 @@ public class DatabaseDiagnosticsPanel extends JPanel {
         topStack.add(hdrCard);
         topStack.add(Box.createVerticalStrut(12));
         topStack.add(metaGrid);
+        topStack.add(Box.createVerticalStrut(10));
+        topStack.add(buildFacultyDemoBar());
 
         add(topStack, BorderLayout.NORTH);
 
@@ -275,6 +300,7 @@ public class DatabaseDiagnosticsPanel extends JPanel {
         schemaPanel.add(schemaTopBar, BorderLayout.NORTH);
         schemaPanel.add(new JScrollPane(schemaRulesArea), BorderLayout.CENTER);
         tabbedPane.addTab("$jsonSchema Rules", schemaPanel);
+        tabbedPane.addTab("Custom Query Console", buildCustomQueryPanel());
 
         updatePipelineCode();
         updateSchemaDisplay();
@@ -651,6 +677,407 @@ public class DatabaseDiagnosticsPanel extends JPanel {
         } catch (Exception e) {
             return iso;
         }
+    }
+
+    private JPanel buildFacultyDemoBar() {
+        JPanel bar = new JPanel(new FlowLayout(FlowLayout.LEFT, 12, 6));
+        bar.setBackground(ThemeManager.cardBg());
+        bar.setBorder(BorderFactory.createCompoundBorder(
+                new MatteBorder(1, 1, 1, 1, ThemeManager.cardBorder()),
+                new EmptyBorder(6, 12, 6, 12)
+        ));
+        bar.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JLabel evalLabel = new JLabel("🎓 Live Faculty Evaluation Actions:");
+        evalLabel.setFont(ThemeManager.font(Font.BOLD, 12));
+        evalLabel.setForeground(ThemeManager.primaryText());
+        bar.add(evalLabel);
+
+        ActionButton probeBtn = new ActionButton("⚡ Live Cloud Write-and-Read Test", ThemeManager.EMERALD_PRIMARY, new Color(0x05, 0x96, 0x69), Color.WHITE, null, 8);
+        probeBtn.setToolTipText("Writes a probe document to MongoDB Atlas audit_logs and reads it back to prove cloud persistence.");
+        probeBtn.addActionListener(e -> runCloudLiveProbe());
+        bar.add(probeBtn);
+
+        ActionButton schemaRejectBtn = new ActionButton("🛡️ Test $jsonSchema Violation Rejection", new Color(0xDC, 0x26, 0x26), new Color(0xB9, 0x1C, 0x1C), Color.WHITE, null, 8);
+        schemaRejectBtn.setToolTipText("Attempts inserting an invalid student document (CGPA 14.5, missing rollNumber) to demonstrate server-side validation error 121.");
+        schemaRejectBtn.addActionListener(e -> runSchemaViolationTest());
+        bar.add(schemaRejectBtn);
+
+        return bar;
+    }
+
+    private void runCloudLiveProbe() {
+        Window owner = SwingUtilities.getWindowAncestor(this);
+        JDialog progressDlg = new JDialog(owner, "MongoDB Cloud Probe", Dialog.ModalityType.APPLICATION_MODAL);
+        progressDlg.setSize(380, 140);
+        progressDlg.setLocationRelativeTo(this);
+        JPanel p = new JPanel(new BorderLayout(10, 10));
+        p.setBorder(new EmptyBorder(20, 20, 20, 20));
+        p.setBackground(ThemeManager.cardBg());
+        JLabel l = new JLabel("Writing probe to Atlas & reading back...", SwingConstants.CENTER);
+        l.setFont(ThemeManager.font(Font.PLAIN, 12));
+        JProgressBar pb = new JProgressBar();
+        pb.setIndeterminate(true);
+        p.add(l, BorderLayout.CENTER);
+        p.add(pb, BorderLayout.SOUTH);
+        progressDlg.setContentPane(p);
+
+        SwingWorker<Document, Void> worker = new SwingWorker<>() {
+            @Override
+            protected Document doInBackground() throws Exception {
+                return DatabaseConnection.getInstance().performCloudLiveProbe();
+            }
+
+            @Override
+            protected void done() {
+                progressDlg.dispose();
+                try {
+                    Document res = get();
+                    long writeMs = res.getLong("writeLatencyMs");
+                    long readMs = res.getLong("readLatencyMs");
+                    long totalMs = res.getLong("totalRoundTripMs");
+                    String probeId = res.getString("probeId");
+                    String cluster = res.getString("clusterType");
+                    String db = res.getString("database");
+                    Document doc = res.get("persistedDocument", Document.class);
+
+                    JTextArea area = new JTextArea();
+                    area.setFont(ThemeManager.monoFont(Font.PLAIN, 11.5f));
+                    area.setEditable(false);
+                    area.setBackground(new Color(0x0F, 0x17, 0x2A));
+                    area.setForeground(new Color(0x34, 0xD3, 0x99));
+                    area.setText(prettyPrintJson(doc != null ? doc.toJson() : res.toJson()));
+
+                    JPanel resultPanel = new JPanel(new BorderLayout(0, 10));
+                    resultPanel.setPreferredSize(new Dimension(580, 380));
+                    JLabel summaryLbl = new JLabel("<html><b style='color:#10B981;font-size:13px;'>Live MongoDB Atlas Cloud Persistence Verified!</b><br/>"
+                            + "Cluster: <code>" + esc(cluster) + "</code> · Database: <code>" + esc(db) + "</code><br/>"
+                            + "Write Latency: <b>" + writeMs + " ms</b> · Read Latency: <b>" + readMs + " ms</b> · Total Round-Trip: <b>" + totalMs + " ms</b><br/>"
+                            + "Probe ObjectId: <code>" + esc(probeId) + "</code><br/>"
+                            + "<span style='color:gray;'>Document was written and confirmed in <code>audit_logs</code> over live connection.</span></html>");
+                    summaryLbl.setFont(ThemeManager.font(Font.PLAIN, 12));
+                    resultPanel.add(summaryLbl, BorderLayout.NORTH);
+                    resultPanel.add(new JScrollPane(area), BorderLayout.CENTER);
+
+                    JOptionPane.showMessageDialog(DatabaseDiagnosticsPanel.this, resultPanel,
+                            "MongoDB Live Cloud Persistence Proof", JOptionPane.INFORMATION_MESSAGE);
+                } catch (Exception ex) {
+                    JOptionPane.showMessageDialog(DatabaseDiagnosticsPanel.this,
+                            "Cloud Probe Failed:\n" + ex.getMessage(),
+                            "Probe Error", JOptionPane.ERROR_MESSAGE);
+                }
+            }
+        };
+        worker.execute();
+        progressDlg.setVisible(true);
+    }
+
+    private void runSchemaViolationTest() {
+        try {
+            Document res = DatabaseConnection.getInstance().testJsonSchemaViolation();
+            boolean rejected = res.getBoolean("rejected", false);
+            if (rejected) {
+                int code = res.getInteger("expectedErrorCode", 121);
+                String msg = res.getString("serverErrorMessage");
+                String cat = res.getString("errorCategory");
+
+                JTextArea area = new JTextArea();
+                area.setFont(ThemeManager.monoFont(Font.PLAIN, 11.5f));
+                area.setEditable(false);
+                area.setLineWrap(true);
+                area.setWrapStyleWord(true);
+                area.setBackground(new Color(0x0F, 0x17, 0x2A));
+                area.setForeground(new Color(0xF8, 0x71, 0x71));
+                area.setText(
+                        "MongoDB Server Rejection Details:\n"
+                        + "--------------------------------------------------\n"
+                        + "Error Code    : " + code + " (DocumentValidationFailure)\n"
+                        + "Category      : " + cat + "\n"
+                        + "Server Message: " + msg + "\n\n"
+                        + "Attempted Document:\n"
+                        + "{\n"
+                        + "  \"fullName\": \"Invalid Student Test\",\n"
+                        + "  \"email\": \"not-an-email\",            // VIOLATION: fails email regex pattern\n"
+                        + "  \"academicMetrics\": {\n"
+                        + "    \"cgpa\": 14.5,                     // VIOLATION: maximum is 10.0\n"
+                        + "    \"backlogs\": -1                    // VIOLATION: minimum is 0\n"
+                        + "  },\n"
+                        + "  \"approvalStatus\": \"NON_EXISTENT\"    // VIOLATION: not in allowed enum\n"
+                        + "  // Missing required field: 'rollNumber'\n"
+                        + "}"
+                );
+
+                JPanel panel = new JPanel(new BorderLayout(0, 10));
+                panel.setPreferredSize(new Dimension(600, 380));
+                JLabel lbl = new JLabel("<html><b style='color:#DC2626;font-size:13px;'>Server-Side $jsonSchema Governance Enforced!</b><br/>"
+                        + "The document was successfully intercepted and rejected by the MongoDB database engine (Error Code 121).<br/>"
+                        + "This proves schema rules are enforced at the database level, preventing invalid data from ever persisting.</html>");
+                lbl.setFont(ThemeManager.font(Font.PLAIN, 12));
+                panel.add(lbl, BorderLayout.NORTH);
+                panel.add(new JScrollPane(area), BorderLayout.CENTER);
+
+                JOptionPane.showMessageDialog(this, panel, "$jsonSchema Validation Enforcement Demo", JOptionPane.WARNING_MESSAGE);
+            } else {
+                JOptionPane.showMessageDialog(this,
+                        res.getString("message"),
+                        "Validation Alert", JOptionPane.WARNING_MESSAGE);
+            }
+        } catch (Exception ex) {
+            JOptionPane.showMessageDialog(this, "Failed to run schema validation test: " + ex.getMessage(),
+                    "Execution Error", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    private JPanel buildCustomQueryPanel() {
+        JPanel panel = new JPanel(new BorderLayout(0, 10));
+        panel.setBorder(new EmptyBorder(10, 10, 10, 10));
+        panel.setOpaque(false);
+
+        // Top Controls: Collection & Preset Dropdowns
+        JPanel topBar = new JPanel(new GridBagLayout());
+        topBar.setOpaque(false);
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.insets = new Insets(4, 6, 4, 6);
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+
+        gbc.gridx = 0; gbc.gridy = 0; gbc.weightx = 0.0;
+        JLabel colLbl = new JLabel("Target Collection:");
+        colLbl.setFont(ThemeManager.font(Font.BOLD, 11.5f));
+        topBar.add(colLbl, gbc);
+
+        gbc.gridx = 1; gbc.gridy = 0; gbc.weightx = 0.3;
+        topBar.add(customColCombo, gbc);
+
+        gbc.gridx = 2; gbc.gridy = 0; gbc.weightx = 0.0;
+        JLabel preLbl = new JLabel("Presets:");
+        preLbl.setFont(ThemeManager.font(Font.BOLD, 11.5f));
+        topBar.add(preLbl, gbc);
+
+        gbc.gridx = 3; gbc.gridy = 0; gbc.weightx = 0.7;
+        topBar.add(customPresetCombo, gbc);
+
+        // Mid section: Filter, Sort, Limit
+        JPanel filterPanel = new JPanel(new BorderLayout(0, 6));
+        filterPanel.setOpaque(false);
+
+        queryFilterArea.setFont(ThemeManager.monoFont(Font.PLAIN, 12));
+        queryFilterArea.setRows(5);
+        queryFilterArea.setBackground(new Color(0x1E, 0x29, 0x3B));
+        queryFilterArea.setForeground(new Color(0x38, 0xBD, 0xF8));
+        queryFilterArea.setCaretColor(Color.WHITE);
+        queryFilterArea.setText("{\n  \n}");
+
+        JPanel filterHeader = new JPanel(new BorderLayout());
+        filterHeader.setOpaque(false);
+        JLabel fLabel = new JLabel("MongoDB JSON Filter (e.g. { \"academicMetrics.cgpa\": { \"$gte\": 8.5 } }):");
+        fLabel.setFont(ThemeManager.font(Font.BOLD, 11));
+        filterHeader.add(fLabel, BorderLayout.WEST);
+
+        JPanel sortLimitBar = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
+        sortLimitBar.setOpaque(false);
+        JLabel sLbl = new JLabel("Sort (JSON):");
+        sLbl.setFont(ThemeManager.font(Font.PLAIN, 11));
+        querySortField.setFont(ThemeManager.monoFont(Font.PLAIN, 11));
+        querySortField.setPreferredSize(new Dimension(170, 26));
+        querySortField.setText("{\"_id\": -1}");
+
+        JLabel lLbl = new JLabel("Limit:");
+        lLbl.setFont(ThemeManager.font(Font.PLAIN, 11));
+        sortLimitBar.add(sLbl);
+        sortLimitBar.add(querySortField);
+        sortLimitBar.add(lLbl);
+        sortLimitBar.add(queryLimitSpinner);
+        filterHeader.add(sortLimitBar, BorderLayout.EAST);
+
+        filterPanel.add(filterHeader, BorderLayout.NORTH);
+        filterPanel.add(new JScrollPane(queryFilterArea), BorderLayout.CENTER);
+
+        // Action Buttons Row
+        JPanel actionRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 4));
+        actionRow.setOpaque(false);
+
+        ActionButton runBtn = new ActionButton("▶ Execute Find Query", ThemeManager.EMERALD_PRIMARY, new Color(0x05, 0x96, 0x69), Color.WHITE, null, 8);
+        runBtn.addActionListener(e -> executeCustomQuery());
+        actionRow.add(runBtn);
+
+        ActionButton explainBtn = new ActionButton("⚡ Explain Plan (.explain('executionStats'))", ThemeManager.BLUE_ELECTRIC, ThemeManager.BLUE_HOVER, Color.WHITE, null, 8);
+        explainBtn.addActionListener(e -> explainCustomQuery());
+        actionRow.add(explainBtn);
+
+        ActionButton clearBtn = new ActionButton("Clear / Reset", ThemeManager.cardSubtleBg(), ThemeManager.cardBorder(), ThemeManager.primaryText(), ThemeManager.cardBorder(), 8);
+        clearBtn.addActionListener(e -> {
+            queryFilterArea.setText("{\n  \n}");
+            querySortField.setText("{\"_id\": -1}");
+            queryResultsArea.setText("// Enter a JSON filter and click 'Execute Find Query' or 'Explain Plan'...");
+            queryStatsLabel.setText("Console cleared.");
+        });
+        actionRow.add(clearBtn);
+
+        queryStatsLabel.setFont(ThemeManager.font(Font.BOLD, 11.5f));
+        queryStatsLabel.setForeground(ThemeManager.secondaryText());
+        actionRow.add(queryStatsLabel);
+
+        filterPanel.add(actionRow, BorderLayout.SOUTH);
+
+        // Lower: Results text area
+        queryResultsArea.setFont(ThemeManager.monoFont(Font.PLAIN, 12));
+        queryResultsArea.setEditable(false);
+        queryResultsArea.setBackground(new Color(0x0F, 0x17, 0x2A));
+        queryResultsArea.setForeground(new Color(0x38, 0xBD, 0xF8));
+        queryResultsArea.setText("// Live query results will render here in formatted JSON...");
+
+        JSplitPane split = new JSplitPane(JSplitPane.VERTICAL_SPLIT, filterPanel, new JScrollPane(queryResultsArea));
+        split.setResizeWeight(0.35);
+        split.setDividerSize(6);
+
+        panel.add(topBar, BorderLayout.NORTH);
+        panel.add(split, BorderLayout.CENTER);
+
+        // Preset Listener
+        customPresetCombo.addActionListener(e -> applyQueryPreset());
+
+        return panel;
+    }
+
+    private void applyQueryPreset() {
+        int idx = customPresetCombo.getSelectedIndex();
+        switch (idx) {
+            case 1 -> { // Students: CGPA >= 8.5 & 0 Backlogs
+                customColCombo.setSelectedItem("students");
+                queryFilterArea.setText("{\n  \"academicMetrics.cgpa\": { \"$gte\": 8.5 },\n  \"academicMetrics.backlogs\": 0\n}");
+                querySortField.setText("{\"academicMetrics.cgpa\": -1}");
+            }
+            case 2 -> { // Students: Embedded Skills ($elemMatch Python rating >= 4)
+                customColCombo.setSelectedItem("students");
+                queryFilterArea.setText("{\n  \"skills\": {\n    \"$elemMatch\": {\n      \"name\": \"Python\",\n      \"rating\": { \"$gte\": 4 }\n    }\n  }\n}");
+                querySortField.setText("{\"academicMetrics.cgpa\": -1}");
+            }
+            case 3 -> { // Students: Placed with Package >= 10 LPA
+                customColCombo.setSelectedItem("students");
+                queryFilterArea.setText("{\n  \"placementStatus\": \"PLACED\",\n  \"placedPackageLpa\": { \"$gte\": 10.0 }\n}");
+                querySortField.setText("{\"placedPackageLpa\": -1}");
+            }
+            case 4 -> { // Placement Drives: CTC >= 10 LPA & OPEN
+                customColCombo.setSelectedItem("placement_drives");
+                queryFilterArea.setText("{\n  \"ctcLpa\": { \"$gte\": 10.0 },\n  \"status\": \"OPEN\"\n}");
+                querySortField.setText("{\"ctcLpa\": -1}");
+            }
+            case 5 -> { // Placement Drives: Required Skill 'Java' or 'Spring Boot'
+                customColCombo.setSelectedItem("placement_drives");
+                queryFilterArea.setText("{\n  \"requiredSkills\": { \"$in\": [\"Java\", \"Spring Boot\"] }\n}");
+                querySortField.setText("{\"driveDate\": -1}");
+            }
+            case 6 -> { // Applications: Status OFFERED or SELECTED
+                customColCombo.setSelectedItem("applications");
+                queryFilterArea.setText("{\n  \"status\": { \"$in\": [\"OFFERED\", \"SELECTED\"] }\n}");
+                querySortField.setText("{\"appliedAt\": -1}");
+            }
+            case 7 -> { // Applications: Stage History containing TECHNICAL_INTERVIEW
+                customColCombo.setSelectedItem("applications");
+                queryFilterArea.setText("{\n  \"stageHistory.stage\": \"TECHNICAL_INTERVIEW\"\n}");
+                querySortField.setText("{\"appliedAt\": -1}");
+            }
+            case 8 -> { // Companies: Tier 1 Dream Companies
+                customColCombo.setSelectedItem("companies");
+                queryFilterArea.setText("{\n  \"tier\": \"TIER_1_DREAM\"\n}");
+                querySortField.setText("{\"companyName\": 1}");
+            }
+            case 9 -> { // Audit Logs: Faculty & Admin Probe Events
+                customColCombo.setSelectedItem("audit_logs");
+                queryFilterArea.setText("{\n  \"action\": { \"$regex\": \"FACULTY|ADMIN|PROBE\", \"$options\": \"i\" }\n}");
+                querySortField.setText("{\"timestamp\": -1}");
+            }
+            default -> {
+                queryFilterArea.setText("{\n  \n}");
+                querySortField.setText("{\"_id\": -1}");
+            }
+        }
+    }
+
+    private void executeCustomQuery() {
+        String col = (String) customColCombo.getSelectedItem();
+        String filter = queryFilterArea.getText().trim();
+        String sort = querySortField.getText().trim();
+        int limit = (Integer) queryLimitSpinner.getValue();
+
+        queryStatsLabel.setText("Executing query against collection '" + col + "'...");
+        queryResultsArea.setText("// Querying MongoDB...");
+
+        SwingWorker<List<Document>, Void> worker = new SwingWorker<>() {
+            private long execMs;
+
+            @Override
+            protected List<Document> doInBackground() throws Exception {
+                long t0 = System.currentTimeMillis();
+                List<Document> docs = DatabaseConnection.getInstance().executeFind(col, filter, sort, limit);
+                execMs = System.currentTimeMillis() - t0;
+                return docs;
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    List<Document> docs = get();
+                    StringBuilder sb = new StringBuilder();
+                    sb.append("// Query Filter : ").append(filter.isEmpty() ? "{}" : filter.replaceAll("\\s+", " ")).append("\n");
+                    sb.append("// Sort Clause  : ").append(sort.isEmpty() ? "none" : sort).append("\n");
+                    sb.append("// Documents Returned : ").append(docs.size()).append(" (Limit: ").append(limit).append(") · Latency: ").append(execMs).append(" ms\n\n");
+
+                    if (docs.isEmpty()) {
+                        sb.append("// (No matching documents found in '").append(col).append("')\n");
+                    } else {
+                        for (int i = 0; i < docs.size(); i++) {
+                            sb.append("/* Document #").append(i + 1).append(" */\n");
+                            sb.append(prettyPrintJson(docs.get(i).toJson())).append("\n\n");
+                        }
+                    }
+                    queryResultsArea.setText(sb.toString());
+                    queryResultsArea.setCaretPosition(0);
+                    queryStatsLabel.setText("✔ Returned " + docs.size() + " document(s) in " + execMs + " ms.");
+                    queryStatsLabel.setForeground(ThemeManager.EMERALD_PRIMARY);
+                } catch (Exception ex) {
+                    queryResultsArea.setText("// Query Execution Error:\n" + ex.getMessage());
+                    queryStatsLabel.setText("✖ Error executing query.");
+                    queryStatsLabel.setForeground(ThemeManager.ROSE_PRIMARY);
+                }
+            }
+        };
+        worker.execute();
+    }
+
+    private void explainCustomQuery() {
+        String col = (String) customColCombo.getSelectedItem();
+        String filter = queryFilterArea.getText().trim();
+
+        queryStatsLabel.setText("Generating executionStats explain plan for '" + col + "'...");
+        queryResultsArea.setText("// Running .explain(\"executionStats\")...");
+
+        SwingWorker<String, Void> worker = new SwingWorker<>() {
+            @Override
+            protected String doInBackground() throws Exception {
+                return DatabaseConnection.getInstance().explainFind(col, filter);
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    String explainJson = get();
+                    String summary = summarizeExplain(explainJson);
+                    queryResultsArea.setText("// MongoDB executionStats Explain Plan for collection: " + col + "\n"
+                            + "// Filter: " + (filter.isEmpty() ? "{}" : filter.replaceAll("\\s+", " ")) + "\n"
+                            + summary + "\n\n"
+                            + prettyPrintJson(explainJson));
+                    queryResultsArea.setCaretPosition(0);
+                    queryStatsLabel.setText("✔ Explain plan generated. " + summary.replace("// ", ""));
+                    queryStatsLabel.setForeground(ThemeManager.BLUE_ELECTRIC);
+                } catch (Exception ex) {
+                    queryResultsArea.setText("// Explain Plan Error:\n" + ex.getMessage());
+                    queryStatsLabel.setText("✖ Explain plan generation failed.");
+                    queryStatsLabel.setForeground(ThemeManager.ROSE_PRIMARY);
+                }
+            }
+        };
+        worker.execute();
     }
 
     private static String nonBlank(String val, String fallback) {

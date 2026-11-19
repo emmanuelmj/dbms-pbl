@@ -284,6 +284,25 @@ public final class SmokeTest {
             }
         }
 
+        // 9. DBMS Faculty Evaluation Console Probes
+        System.out.println("[9] DBMS Faculty Evaluation Console Probes");
+        Document liveProbe = conn.performCloudLiveProbe();
+        check("performCloudLiveProbe (live write & read persistence)",
+                "SUCCESS".equals(liveProbe.getString("status")) && liveProbe.containsKey("probeId"),
+                "write=" + liveProbe.get("writeLatencyMs") + "ms read=" + liveProbe.get("readLatencyMs") + "ms total=" + liveProbe.get("totalRoundTripMs") + "ms");
+
+        Document schemaViolation = conn.testJsonSchemaViolation();
+        check("testJsonSchemaViolation (server-side rule 121 rejection)",
+                schemaViolation.getBoolean("rejected", false) && schemaViolation.getInteger("expectedErrorCode") == 121,
+                "code=" + schemaViolation.get("expectedErrorCode") + " cat=" + schemaViolation.get("errorCategory"));
+
+        List<Document> findResults = conn.executeFind("students", "{\"academicMetrics.cgpa\": {\"$gte\": 8.5}}", "{\"academicMetrics.cgpa\": -1}", 5);
+        check("executeFind custom query (high CGPA students)", !findResults.isEmpty() && findResults.size() <= 5, "returned=" + findResults.size());
+
+        String explainOutput = conn.explainFind("students", "{\"academicMetrics.cgpa\": {\"$gte\": 8.5}}");
+        check("explainFind (.explain('executionStats'))", explainOutput != null && explainOutput.contains("executionStats"),
+                explainOutput != null ? "length=" + explainOutput.length() : "null");
+
         long ms = System.currentTimeMillis() - t0;
         System.out.println();
         System.out.println("=== RESULT: " + passed + " passed, " + failed + " failed (" + ms + " ms) against " + cfg.getClusterType() + " ===");

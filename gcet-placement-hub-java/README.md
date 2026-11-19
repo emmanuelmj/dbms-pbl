@@ -90,22 +90,25 @@ The complete list of accounts and demo scenarios (pending approvals, live applic
 
 ---
 
-## 🔬 Live Schema & Aggregation Inspector (DBMS Evaluation)
+## 🔬 Live Schema & Aggregation Inspector (DBMS Faculty Evaluation)
 
-The desktop application includes a dedicated **Live Schema & Aggregation Inspector** (`Settings` -> `Database Diagnostics` or top-right `● MongoDB: Atlas` status pill):
+The desktop application includes a dedicated **DBMS Faculty Console** (accessible from the sidebar with the **⚡ Atlas** badge or the top-right database status pill):
 
-- **Tab 1: Collections & Indexes:** Live document counts, storage sizes, and full BSON index metadata (unique, compound, multikey, text).
+- **Live Cloud Persistence Probe:** Button in the top action bar to write a live audit probe to Atlas and read it back, proving remote cloud persistence with round-trip latency metrics.
+- **$jsonSchema Rejection Test:** Button to attempt an illegal student insertion (CGPA 14.5, missing rollNumber), demonstrating server-side rejection (Error Code 121).
+- **Tab 1: Collections & Indexes:** Live document counts, storage sizes, and full BSON index metadata (unique compound, multikey, text).
 - **Tab 2: Live BSON Samples:** Real-time query inspector comparing embedded documents (`students`, `placement_drives`, `applications`) against referenced collections.
 - **Tab 3: Aggregation & EXPLAIN:** Live execution of five real pipelines — branch analytics (`$group`), drive eligibility (`$match`/`$project`), skill-gap (`$setIntersection`/`$setDifference`/`$lookup`), CTC distribution (`$bucket`) and the application funnel (`$facet`/`$unwind`) — each with `.explain("executionStats")` index metrics. The JSON shown is rendered from the exact pipeline the Java code sends.
 - **Tab 4: $jsonSchema Rules:** Live inspection of server-enforced JSON validation contracts ensuring zero data anomalies.
+- **Tab 5: Custom Query Console:** Live MongoDB query runner supporting collection selection, preset templates (CGPA filtering, `$elemMatch` array queries, text searches), custom JSON filters, custom sort, and `.explain("executionStats")` plan generation.
 
-Headless check of the same features (60 assertions, exit code 0 on success):
+Headless check of the entire architecture (64 assertions, exit code 0 on success):
 
 ```bash
 ./mvnw -q test-compile exec:java -Dexec.classpathScope=test -Dexec.mainClass=edu.gcet.placementhub.SmokeTest
 ```
 
-For the comprehensive theoretical and architectural evaluation submitted for our DBMS review, see [MONGODB_ARCHITECTURE.md](../MONGODB_ARCHITECTURE.md); for a from-scratch machine setup see [SETUP_AND_RUN.md](../SETUP_AND_RUN.md).
+For copy-pasteable `mongosh` queries, Compass instructions, and viva Q&A talking points, see [DBMS_VIVA_QUERIES.md](DBMS_VIVA_QUERIES.md); for the relational vs document model architecture report see [MONGODB_ARCHITECTURE.md](../MONGODB_ARCHITECTURE.md); for teammate machine setup see [SETUP_AND_RUN.md](../SETUP_AND_RUN.md).
 
 ---
 

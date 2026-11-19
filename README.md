@@ -39,6 +39,7 @@ GCET Placement Hub aims to simplify placement activities by providing a centrali
 - JFreeChart, OpenPDF
 
 > New teammate on a fresh laptop? Start with **[SETUP_AND_RUN.md](SETUP_AND_RUN.md)** (zero pre-installed dependencies).  
+> Live Faculty Evaluation & Viva Queries: **[DBMS_VIVA_QUERIES.md](DBMS_VIVA_QUERIES.md)**.  
 > DBMS design report: **[MONGODB_ARCHITECTURE.md](MONGODB_ARCHITECTURE.md)**.
 
 ## Project Structure
