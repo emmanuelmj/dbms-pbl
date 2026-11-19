@@ -25,6 +25,7 @@ public class SidebarPanel extends JPanel {
 
     private static final List<NavItem> NAV_ITEMS = List.of(
             new NavItem("dashboard", "Dashboard", "▣", null, false),
+            new NavItem("diagnostics", "DBMS Faculty Console", "⚡", "Atlas", false),
             new NavItem("campus-connect", "Campus Connect", "★", "GCTC", false),
             new NavItem("approvals", "Approval Center", "⛨", "RBAC", true),
             new NavItem("students", "Students", "👥", null, true),
@@ -39,7 +40,6 @@ public class SidebarPanel extends JPanel {
             new NavItem("applications", "Applications", "▤", null, false),
             new NavItem("reports", "Reports & Analytics", "▥", null, false),
             new NavItem("audit-logs", "Audit Logs", "∿", null, true),
-            new NavItem("diagnostics", "DBMS Faculty Console", "⚡", "Atlas", false),
             new NavItem("settings", "Settings & Security", "⚙", null, false)
     );
 

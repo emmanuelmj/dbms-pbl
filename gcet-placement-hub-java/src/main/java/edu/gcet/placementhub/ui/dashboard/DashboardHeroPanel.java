@@ -163,14 +163,14 @@ public class DashboardHeroPanel extends JPanel {
         dbDotLabel = new JLabel("●");
         dbDotLabel.setFont(ThemeManager.font(Font.BOLD, 10));
         dbDotLabel.setForeground(new Color(0xF4, 0x3F, 0x5E));
-        dbTextLabel = new JLabel("Checking MySQL JDBC...");
+        dbTextLabel = new JLabel("Checking MongoDB Atlas...");
         dbTextLabel.setFont(ThemeManager.monoFont(Font.BOLD, 11));
         dbTextLabel.setForeground(new Color(0xE2, 0xE8, 0xF0));
         dbLeft.add(dbDotLabel);
         dbLeft.add(dbTextLabel);
 
         refreshBtn = new JButton("↻");
-        refreshBtn.setToolTipText("Refresh Live MySQL Database Statistics & Test Connection");
+        refreshBtn.setToolTipText("Refresh Live MongoDB Database Statistics & Test Connection");
         refreshBtn.setFont(ThemeManager.font(Font.BOLD, 14));
         refreshBtn.setForeground(ThemeManager.CYAN_ACCENT);
         refreshBtn.setOpaque(false);
@@ -185,6 +185,27 @@ public class DashboardHeroPanel extends JPanel {
 
         dbStrip.add(dbLeft, BorderLayout.CENTER);
         dbStrip.add(refreshBtn, BorderLayout.EAST);
+        dbStrip.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        dbStrip.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override
+            public void mouseClicked(java.awt.event.MouseEvent e) {
+                onNavigate.accept("diagnostics");
+            }
+        });
+
+        ActionButton facultyConsoleBtn = new ActionButton(
+                "⚡  DBMS Faculty Console  ›",
+                new Color(16, 185, 129, 210),
+                new Color(5, 150, 105, 230),
+                Color.WHITE,
+                new Color(52, 211, 153, 110),
+                12
+        );
+        facultyConsoleBtn.setFont(ThemeManager.font(Font.BOLD, 12));
+        facultyConsoleBtn.setMaximumSize(new Dimension(285, 40));
+        facultyConsoleBtn.setPreferredSize(new Dimension(285, 40));
+        facultyConsoleBtn.setAlignmentX(Component.CENTER_ALIGNMENT);
+        facultyConsoleBtn.addActionListener(e -> onNavigate.accept("diagnostics"));
 
         ActionButton campusBtn = new ActionButton(
                 "Campus Connect Portal",
@@ -194,8 +215,8 @@ public class DashboardHeroPanel extends JPanel {
                 new Color(96, 165, 250, 110),
                 12
         );
-        campusBtn.setMaximumSize(new Dimension(285, 40));
-        campusBtn.setPreferredSize(new Dimension(285, 40));
+        campusBtn.setMaximumSize(new Dimension(285, 38));
+        campusBtn.setPreferredSize(new Dimension(285, 38));
         campusBtn.setAlignmentX(Component.CENTER_ALIGNMENT);
         campusBtn.addActionListener(e -> onNavigate.accept("campus-connect"));
 
@@ -207,8 +228,8 @@ public class DashboardHeroPanel extends JPanel {
                 new Color(255, 255, 255, 55),
                 12
         );
-        createDriveBtn.setMaximumSize(new Dimension(285, 40));
-        createDriveBtn.setPreferredSize(new Dimension(285, 40));
+        createDriveBtn.setMaximumSize(new Dimension(285, 38));
+        createDriveBtn.setPreferredSize(new Dimension(285, 38));
         createDriveBtn.setAlignmentX(Component.CENTER_ALIGNMENT);
         createDriveBtn.addActionListener(e -> onNavigate.accept("drives"));
 
@@ -220,8 +241,8 @@ public class DashboardHeroPanel extends JPanel {
                 new Color(255, 255, 255, 55),
                 12
         );
-        eligibilityBtn.setMaximumSize(new Dimension(285, 38));
-        eligibilityBtn.setPreferredSize(new Dimension(285, 38));
+        eligibilityBtn.setMaximumSize(new Dimension(285, 36));
+        eligibilityBtn.setPreferredSize(new Dimension(285, 36));
         eligibilityBtn.setAlignmentX(Component.CENTER_ALIGNMENT);
         eligibilityBtn.addActionListener(e -> onNavigate.accept("eligibility"));
 
@@ -242,6 +263,8 @@ public class DashboardHeroPanel extends JPanel {
         rightCol.add(Box.createVerticalGlue());
         rightCol.add(dbStrip);
         rightCol.add(Box.createVerticalStrut(10));
+        rightCol.add(facultyConsoleBtn);
+        rightCol.add(Box.createVerticalStrut(8));
         rightCol.add(campusBtn);
         rightCol.add(Box.createVerticalStrut(8));
         rightCol.add(createDriveBtn);
@@ -271,18 +294,20 @@ public class DashboardHeroPanel extends JPanel {
                 } catch (Exception ignored) {
                 }
             }
-            dbTextLabel.setText("MySQL Connected" + ts);
+            String clusterType = (status.getClusterType() != null && !status.getClusterType().isBlank())
+                    ? status.getClusterType() : "MongoDB";
+            dbTextLabel.setText(clusterType + " Connected" + ts);
         } else {
             dbDotLabel.setForeground(new Color(0xF4, 0x3F, 0x5E));
             dbTextLabel.setForeground(new Color(0xFD, 0xA4, 0xAF));
-            dbTextLabel.setText("MySQL Disconnected");
+            dbTextLabel.setText("MongoDB Disconnected");
         }
     }
 
     public void setRefreshing(boolean loading) {
         refreshBtn.setEnabled(!loading);
         if (loading) {
-            dbTextLabel.setText("Refreshing MySQL...");
+            dbTextLabel.setText("Refreshing MongoDB Atlas...");
         }
     }
 
