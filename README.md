@@ -74,13 +74,13 @@ gcet-placement-hub/
 1. Clone the repository.
 
 ```bash
-git clone YOUR_GITHUB_REPOSITORY_URL
+git clone https://github.com/emmanuelmj/dbms-pbl.git
 ```
 
 2. Enter the project folder.
 
 ```bash
-cd gcet-placement-hub
+cd dbms-pbl
 ```
 
 3. Install dependencies.

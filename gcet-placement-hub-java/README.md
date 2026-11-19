@@ -13,8 +13,8 @@ A cross-platform Java 17 desktop system built with **Java Swing**, **FlatLaf 3.5
 
 ```bash
 # 1. Clone repository & enter the Java project directory
-git clone https://github.com/your-username/gcet-placement-hub.git
-cd gcet-placement-hub/gcet-placement-hub-java
+git clone https://github.com/emmanuelmj/dbms-pbl.git
+cd dbms-pbl/gcet-placement-hub-java
 
 # 2. Configure MongoDB Atlas URI (or keep default local MongoDB)
 cp .env.example .env

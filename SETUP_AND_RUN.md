@@ -75,10 +75,10 @@ This guide is for a teammate starting from a **completely fresh macOS or Windows
 
 ## Part 2 — Cloning the Repository & Configuring `.env`
 
-1. **Clone** (replace the URL with the repository you were invited to):
+1. **Clone**:
    ```bash
-   git clone https://github.com/munavathsandeep/gcet-placement-hub11.git
-   cd gcet-placement-hub11/gcet-placement-hub-java
+   git clone https://github.com/emmanuelmj/dbms-pbl.git
+   cd dbms-pbl/gcet-placement-hub-java
    ```
 
 2. **Create your private `.env` from the template** — `.env` is git-ignored and must never be committed:
