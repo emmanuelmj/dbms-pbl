@@ -485,10 +485,11 @@ db.students.insertOne({
 
 ## 7. Viva Q&A Talking Points (High-Scoring Answers)
 
-### Q1: Why migrate from Relational MySQL to MongoDB for a College Placement System?
-> **Answer:** In GCET's placement domain, student profiles are heavily hierarchical: a student has multiple skills (with ratings), certifications, projects, internships, and academic milestones.
-> - **In MySQL (3NF):** Rendering a single student profile required a 6-table `JOIN` (`students` $\bowtie$ `student_skills` $\bowtie$ `certifications` $\bowtie$ `projects` $\bowtie$ `internships` $\bowtie$ `academic_metrics`). This created join overhead and complex multi-table transactions.
-> - **In MongoDB (Document Model):** The entire student profile is stored as a single cohesive BSON document. A single read operation (`db.students.findOne({ rollNumber: ... })`) retrieves the entire profile with zero joins, reducing network round-trips and memory overhead.
+### Q1: Why is a Document-Oriented Architecture (MongoDB) optimal for a College Placement System?
+> **Answer:** In GCET's placement domain, student profiles and application records are deeply hierarchical. A student maintains multiple verified skills (with ratings), certifications, projects, internships, and semester-wise academic metrics.
+> - **Zero-Join Reads (< 5ms):** The entire student profile is stored as a single cohesive BSON document aggregate. A single read operation (`db.students.findOne({ rollNumber: ... })`) retrieves the entire portfolio with zero joins, reducing network round-trips and memory overhead.
+> - **Atomic Profile Updates:** Modifying a student's skills, projects, or application status uses atomic array operators (`$push`, `$pull`, and positional `$`), executing in a single atomic database operation.
+> - **Native Aggregations:** Complex institutional metrics (branch placement ratios, eligibility screening, skill gap set algebra) execute inside MongoDB's C++ aggregation engine rather than requiring heavy application-layer transformations.
 
 ### Q2: Why did you EMBED skills and projects, but REFERENCE companies and placement drives?
 > **Answer:** We followed the canonical MongoDB modeling rule: **"Data that is accessed together and has 1-to-few bounded cardinality should be embedded; data with independent lifecycles or 1-to-many unbounded cardinality should be referenced."**
